@@ -1,7 +1,9 @@
 import socket
 import random
+import sys
 
 # Define the allowed port range based on G = 34
+# For group 34 it is 18000-18499
 G = 34
 PORT_RANGE = range(((G // 2) * 1000) + 1000, ((G // 2) * 1000) + 1499)
 
@@ -33,7 +35,7 @@ class DHTManager:
         cmd_type = command[0]
         
         if cmd_type == "register" and len(command) == 5:
-            return self.register_peer(command[1], command[2], int(command[3]), int(command[4]))
+            return self.handle_register(command[1], command[2], int(command[3]), int(command[4]))
         elif cmd_type == "setup-dht" and len(command) == 4:
             return self.setup_dht(command[1], int(command[2]), command[3])
         elif cmd_type == "dht-complete" and len(command) == 2:
@@ -41,11 +43,16 @@ class DHTManager:
         else:
             return "FAILURE Invalid command"
     
-    def register_peer(self, peer_name, ip, m_port, p_port):
+    # REGISTER (Receive) 
+    def handle_register(self, peer_name, ip, m_port, p_port):
+        # Output packet sent and received 
+        print(f"[REGISTER] Received from {peer_name}, {ip}, on p2p port {p_port}]")
         if peer_name in self.peers or any(p[1] == ip and (p[2] == m_port or p[3] == p_port) for p in self.peers.values()):
+            print("SENT: FAILURE Duplicate peer or port conflict")
             return "FAILURE Duplicate peer or port conflict"
         
         self.peers[peer_name] = (ip, m_port, p_port, "Free")
+        print("SENT: SUCCESS")
         return "SUCCESS"
     
     def setup_dht(self, leader, n, year):
@@ -75,6 +82,10 @@ class DHTManager:
         return "SUCCESS"
     
 if __name__ == "__main__":
-    port = int(input("Enter manager port number: (Range is 18000-18499)"))
+    # port = int(input("Enter manager port number: (Range is 18000-18499)"))
+    if len(sys.argv) != 2:
+        print("Usage: python dht-peer.py <manager_port (18000-18499)>")
+        sys.exit(1)
+    port = int(sys.argv[1])
     manager = DHTManager(port)
     manager.run()
