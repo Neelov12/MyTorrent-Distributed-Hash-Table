@@ -27,6 +27,69 @@ class DHTPeer:
         self.ring_size = None
         self.right_neighbor = None
 
+    # Manages listens and responses 
+    def listen_loop(self):
+        """Continuously listen for incoming UDP messages."""
+        print(f"{peer_name} is listening on port {p_port}...")
+        while True:
+            try:
+                data, addr = self.sock.recvfrom(1024)
+                command = data.decode().split()
+                if not command:
+                    continue
+
+                response = self.process_command(command)
+                print(f"[RECEIVED] From {addr}: {' '.join(command)}")
+                if "FAILURE" in command:
+                    print("[SENT]No message sent")
+                else:
+                    print(f"[SENT] {response}\n")
+                    self.sock.sendto(response.encode(), addr)
+            except Exception as e:
+                print("[ERROR in listen_loop]", e)
+
+    def input_loop(self):
+        # Prompts user to issue command to manager
+        while True: 
+            print(f"\nPeer {peer_name}, enter a command at any time)")
+            print("1: Exit")
+            print("2: Set up DHT (setup-dht)")
+            print(f"3: Listen on your port {p_port}")
+            option = input("\nSelect an option: ").strip()
+
+            if option == "1": 
+                sys.exit() 
+                break
+            elif option == "2":
+                n_size = input("Select size of hash table (integer): ")
+                y = input("Select year of storm data (YYYY): ")
+                peer.setup_dht(n_size, y)
+            elif option == "3":
+                handle_setup_dht()
+                break
+            else:
+                print("Invalid choice. Please enter a valid number.")
+
+    def start(self):
+        """Start listening and input threads."""
+        threading.Thread(target=self.listen_loop, daemon=True).start()
+        self.input_loop()  # Run input loop on main thread (so user can Ctrl+C)
+
+    # Manages appropriate response to command 
+    def process_command(self, command):
+        cmd_type = command[0]
+        resp_type = command[0]+command[1]
+        
+        if cmd_type == "set-id" and len(command) == 5:
+            return self.handle_register(command[1], command[2], int(command[3]), int(command[4]))
+        elif resp_type == "SUCCESS 2":
+            self.initialize_ring(command)
+            return self.handle_setup_dht(command[1], int(command[2]), command[3])
+        elif cmd_type == "dht-complete" and len(command) == 2:
+            return self.dht_complete(command[1])
+        else:
+            return "FAILURE Invalid command"
+
     # REGISTER (Send) 
     # (peer_name, peer ip, m_port, p_port) 
     def register(self):
@@ -35,6 +98,34 @@ class DHTPeer:
         self.sock.sendto(message.encode(), (self.manager_ip, self.manager_port))
         response, _ = self.sock.recvfrom(1024)
         print("Manager Response:", response.decode())
+
+    # SETUP-DHT (Send)
+    # (peer_name, n, yyyy)
+    def setup_dht(self, n, year):
+        """Send setup-dht request to the manager."""
+        message = f"setup-dht {self.peer_name} {n} {year}"
+        self.sock.sendto(message.encode(), (self.manager_ip, self.manager_port))
+
+    # Initialize the ring, store all peers information 
+    def initialize_ring(self, response):
+        """Initialize the DHT ring structure."""
+        lines = response.split('\n')[2:]
+        self.peers = {i: tuple(lines[i].split()) for i in range(len(lines))}
+        print("DHT Ring Established:", self.peers)
+        self.set_ids()
+
+    # Assign ids to all the peers 
+    def set_ids(self):
+        """Assign IDs to peers and establish the ring topology."""
+        self.id = 0  # Leader ID
+        n = len(self.peers)
+        for i in range(1, n):
+            peer_name, peer_ip, peer_port = self.peers[i]
+            set_id_msg = f"set-id {i} {n} " + " ".join(
+                ["{},{},{}".format(*self.peers[j]) for j in range(n)]
+            )
+            print(f"[SENT] {set_id_msg}")
+            self.sock.sendto(set_id_msg.encode(), (peer_ip, int(peer_port)))
 
 
 if __name__ == "__main__":
@@ -80,22 +171,22 @@ if __name__ == "__main__":
     # Initialize peer object 
     peer = DHTPeer(manager_ip, manager_port, peer_name, peer_ip, m_port, p_port)
 
-    # Prompts user for command 
-    while True: 
-        print(f"\nPeer {peer_name}, what would you like to do?")
-        print("1: Register (register)")
-        print("2: Set up DHT (setup-dht)")
-        print(f"3: Listen on your port {p_port}")
-        option = input("\nSelect an option: ").strip()
-
-        if option == "1":
+    # Prompts user to register  
+    while True:
+        confirmation = input("\nWould you like to register? (Y/N): ").strip().lower()
+        if confirmation == "y":
             peer.register()
-            break
-        elif option == "2":
-            handle_setup_dht()
-            break
+            print("\nContinuing...")
+            break 
         else:
-            print("Invalid choice. Please enter a valid number.")
+            print("No commands can be sent to manager before registration. Rerequesting...")
+
+    # Starts multithreading socket and input from user 
+    peer.start() 
+    
+
+
+
 
         
     
