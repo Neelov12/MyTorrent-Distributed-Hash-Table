@@ -26,6 +26,12 @@ class DHTPeer:
         self.id = None
         self.ring_size = None
         self.right_neighbor = None
+        self.CSV_FILE = "detailed-1950.csv"
+        self.REQUIRED_FIELDS = [
+            "EVENT_ID", "STATE", "YEAR", "MONTH_NAME", "EVENT_TYPE", "CZ_TYPE", "CZ_NAME",
+            "INJURIES_DIRECT", "INJURIES_INDIRECT", "DEATHS_DIRECT", "DEATHS_INDIRECT",
+            "DAMAGE_PROPERTY", "DAMAGE_CROPS", "TOR_F_SCALE"
+        ]
 
     # Manages listens and responses 
     def listen_loop(self):
@@ -40,7 +46,7 @@ class DHTPeer:
 
                 response = self.process_command(command)
                 print(f"[RECEIVED] From {addr}: {' '.join(command)}")
-                if "FAILURE" in command:
+                if command[0] == "FAILURE":
                     print("[SENT]No message sent")
                 else:
                     print(f"[SENT] {response}\n")
@@ -78,13 +84,13 @@ class DHTPeer:
     # Manages appropriate response to command 
     def process_command(self, command):
         cmd_type = command[0]
-        resp_type = command[0]+command[1]
+        resp_type = command[0]+" "+command[1]
         
         if cmd_type == "set-id" and len(command) == 5:
-            return self.handle_register(command[1], command[2], int(command[3]), int(command[4]))
+            return self.handle_register(command)
         elif resp_type == "SUCCESS 2":
-            self.initialize_ring(command)
-            return self.handle_setup_dht(command[1], int(command[2]), command[3])
+            self.initialize_ring(' '.join(command))
+            return "Successfully set dht"
         elif cmd_type == "dht-complete" and len(command) == 2:
             return self.dht_complete(command[1])
         else:
@@ -109,8 +115,12 @@ class DHTPeer:
     # Initialize the ring, store all peers information 
     def initialize_ring(self, response):
         """Initialize the DHT ring structure."""
-        lines = response.split('\n')[2:]
-        self.peers = {i: tuple(lines[i].split()) for i in range(len(lines))}
+        lines = response.split(' ')[2:]
+        self.peers = {
+            i: tuple(
+            val for j, val in enumerate(lines[i].strip('()').split(',')) if j != 2)
+            for i in range(len(lines))
+        }
         print("DHT Ring Established:", self.peers)
         self.set_ids()
 
@@ -119,13 +129,84 @@ class DHTPeer:
         """Assign IDs to peers and establish the ring topology."""
         self.id = 0  # Leader ID
         n = len(self.peers)
+        self.ring_size = n
+        self.right_neighbor = self.peers[self.id+1 % self.ring_size]
         for i in range(1, n):
             peer_name, peer_ip, peer_port = self.peers[i]
             set_id_msg = f"set-id {i} {n} " + " ".join(
-                ["{},{},{}".format(*self.peers[j]) for j in range(n)]
+                ["{},{},{},{}".format(j, *self.peers[j]) for j in range(n)]
             )
-            print(f"[SENT] {set_id_msg}")
+            print(f"[SENT] To {peer_name} on {peer_port}: {set_id_msg}")
             self.sock.sendto(set_id_msg.encode(), (peer_ip, int(peer_port)))
+        self.construct_dht()
+    
+    def construct_dht(self): 
+        records = self.load_filtered_data(self.CSV_FILE)
+        num_events = len(records)  # l
+        print(f"Number of events (l): {num_events}")
+
+        s = self.next_prime(2 * num_events)
+        print(f"Next prime greater than 2*l: {s}")
+
+        # Calculate pos for each record using EVENT_ID
+        positions = []
+        for rec in records:
+            try:
+                event_id = int(rec[0])  # EVENT_ID is the first field
+                pos = event_id % s
+                positions.append(pos)
+            except ValueError:
+                print(f"Invalid EVENT_ID: {rec[0]}")
+
+        print(f"Sample positions (first 10): {positions[:10]}")
+
+    def is_prime(self, n):
+        if n <= 1: return False
+        if n == 2: return True
+        if n % 2 == 0: return False
+        for i in range(3, int(n**0.5)+1, 2):
+            if n % i == 0:
+                return False
+        return True
+
+    def next_prime(self, start):
+        while not self.is_prime(start):
+            start += 1
+        return start
+
+    def load_filtered_data(self, filepath):
+        filtered_records = []
+        with open(filepath, newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                filtered_tuple = tuple(row[field] for field in self.REQUIRED_FIELDS)
+                filtered_records.append(filtered_tuple)
+        return filtered_records
+        
+
+    def handle_set_id(self, command):
+    # tokens[0] == "set-id"
+        self.id = int(command[1])
+        self.ring_size = int(command[2])
+
+        # Parse the peer list that follows
+        peer_tuples = command[3:]
+
+        # Reconstruct self.peers as a dictionary
+        self.peers = {}
+        for entry in peer_tuples:
+            parts = entry.split(",")
+            peer_id = int(parts[0])
+            self.peers[peer_id] = tuple(parts[1:])  # ('peer_name', 'ip', 'port')
+
+        # Set right neighbor
+        next_id = (self.id + 1) % self.ring_size
+        self.right_neighbor = self.peers[next_id]
+
+        print(f"[INFO] Assigned ID: {self.id}")
+        print(f"[INFO] Ring size: {self.ring_size}")
+        print(f"[INFO] Right neighbor (ID {next_id}): {self.right_neighbor}")
+
 
 
 if __name__ == "__main__":
