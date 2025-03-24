@@ -65,7 +65,7 @@ class DHTManager:
         elif cmd_type == "setup-dht" and len(command) == 4:
             return self.handle_setup_dht(command[1], int(command[2]), command[3])
         elif cmd_type == "dht-complete" and len(command) == 2:
-            return self.dht_complete(command[1])
+            return self.handle_dht_complete(command[1])
         else:
             return "FAILURE Invalid command"
     
@@ -103,10 +103,10 @@ class DHTManager:
         dht_info = [(p, *self.peers[p][:3]) for p in self.dht]
         return "SUCCESS 2 " + " ".join(["(" + ",".join(map(str, peer)) + ")" for peer in dht_info])
     
-    def dht_complete(self, peer_name):
+    def handle_dht_complete(self, peer_name):
         if self.dht is None or self.dht[0] != peer_name:
             return "FAILURE Not the leader"
-        return "SUCCESS"
+        return "SUCCESS 4"
     
 if __name__ == "__main__":
     # port = int(input("Enter manager port number: (Range is 18000-18499)"))
