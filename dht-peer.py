@@ -75,6 +75,7 @@ class DHTPeer:
                 peer.setup_dht(n_size, y)
             elif option == "3":
                 event_id = input("Enter storm event ID to query: ").strip()
+                self.last_queried_event_id = event_id
                 peer.query_dht(event_id)
             else:
                 print("Invalid choice. Please enter a valid number.")
@@ -107,6 +108,40 @@ class DHTPeer:
         elif resp_type == "SUCCESS 4":
             print("Manager confirms DHT is successfully set up")
             return "Disregard"
+        elif cmd_type == "find-event":
+            return self.handle_find_event(command)
+        elif command[0] == "SUCCESS" and "record=" in ' '.join(command):
+            # Extract parts from the response
+            full_msg = ' '.join(command)
+            try:
+                # Get event ID, hops, and record
+                parts = full_msg.split("record=")
+                header = parts[0].strip().split()
+                record_fields = parts[1].strip().split("|")
+        
+                event_id = header[1]
+                hops_part = [x for x in header if x.startswith("hops=")]
+                hops = hops_part[0].split("=")[1] if hops_part else "?"
+        
+                print(f"\n[QUERY RESULT] Event ID: {event_id}")
+                print(f"Number of hops: {hops}")
+                for i, field in enumerate(record_fields):
+                    print(f"Field {i + 1}: {field}")
+            except Exception as e:
+               print("[ERROR] Failed to get query result:", e)
+            return "Disregard"
+            
+        elif command[0] == "SUCCESS" and len(command) == 4:
+            entry_peer_name = command[1]
+            entry_ip = command[2]
+            entry_pport = int(command[3])
+            event_id = self.last_queried_event_id  # Set earlier in input_loop()
+            msg = f"find-event {event_id} {self.peer_name} {self.peer_ip} {self.p_port} 0"
+            print(f"[SENT] Query sent to {entry_peer_name} at {entry_ip}:{entry_pport}")
+            print(f"[DEBUG] Sending find-event to {entry_ip}:{entry_pport} => {msg}")
+            self.sock.sendto(msg.encode(), (entry_ip, entry_pport))
+            return "Disregard"
+            
         else:
             return "FAILURE Invalid command"
 
@@ -291,6 +326,60 @@ class DHTPeer:
 
         # Return "Disregard" - no response needed for previous node 
         return "Disregard"
+        
+    def query_dht(self, event_id):
+        msg = f"query-dht {self.peer_name}"
+        self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
+
+        try:
+            response, _ = self.sock.recvfrom(2048)
+            parts = response.decode().split()
+            if parts[0] != "SUCCESS":
+                print("[FAILURE] Query rejected by manager:", response.decode())
+                return
+
+            entry_peer_name = parts[1]
+            entry_ip = parts[2]
+            entry_pport = int(parts[3])
+
+            msg = f"find-event {event_id} {self.peer_name} {self.peer_ip} {self.p_port} 0"
+            print(f"[SENT] Query sent to {entry_peer_name} at {entry_ip}:{entry_pport}")
+            print(f"[DEBUG] Sending find-event to {entry_ip}:{entry_pport} => {msg}")
+            self.sock.sendto(msg.encode(), (entry_ip, entry_pport))
+        except Exception as e:
+            print("[ERROR] Failed to send query:", e)
+
+
+    def handle_find_event(self, command):
+        event_id = int(command[1])
+        origin_name = command[2]
+        origin_ip = command[3]
+        origin_port = int(command[4])
+        hops = int(command[5])
+
+        pos = event_id % self.next_prime(2 * 1000)  # You may refine this if needed
+        target_id = pos % self.ring_size
+
+        if self.id == target_id:
+            record = self.local_dht.get(pos)
+            if record:
+                response = f"SUCCESS {event_id} hops={hops} record=" + "|".join(record)
+            else:
+                response = f"FAILURE {event_id} hops={hops} record=NOT_FOUND"
+            print(f"[RESULT] Sent back to {origin_name} at {origin_ip}:{origin_port}")
+            self.sock.sendto(response.encode(), (origin_ip, origin_port))
+            return "Disregard"
+        else:
+            next_id = random.choice([i for i in self.peers if i != self.id])
+            peer_name, peer_ip, peer_port = self.peers[next_id]
+            if int(peer_port) == self.manager_port:
+                print("[WARN] Not forwarding to manager (invalid peer)")
+                return "Disregard"
+            hops += 1
+            forward_msg = f"find-event {event_id} {origin_name} {origin_ip} {origin_port} {hops}"
+            print(f"[FORWARD] To {peer_name} at {peer_ip}:{peer_port} (hop {hops})")
+            self.sock.sendto(forward_msg.encode(), (peer_ip, int(peer_port)))
+            return "Disregard"
 
 if __name__ == "__main__":
     # port = int(input("Enter manager port number: (Range is 18000-18499)"))

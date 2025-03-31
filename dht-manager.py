@@ -108,6 +108,8 @@ class DHTManager:
     def handle_dht_complete(self, peer_name):
         if self.dht is None or self.dht[0] != peer_name:
             return "FAILURE Not the leader"
+        for p in self.dht:
+            self.peers[p] = (*self.peers[p][:3], "Free")
         return "SUCCESS 4"
 
     def handle_query_dht(self, peer_name):
