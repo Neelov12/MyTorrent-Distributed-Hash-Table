@@ -33,6 +33,7 @@ class DHTPeer:
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", p_port))
+        self.left_dht = False
 
 
     # Manages listens and responses 
@@ -64,6 +65,7 @@ class DHTPeer:
             print("1: Exit")
             print("2: Set up DHT (setup-dht)")
             print("3: Query DHT for event_id")
+            print("4: Leave DHT (leave-dht)")
             option = input("\nSelect an option: \n").strip()
 
             if option == "1": 
@@ -77,6 +79,17 @@ class DHTPeer:
                 event_id = input("Enter storm event ID to query: ").strip()
                 self.last_queried_event_id = event_id
                 peer.query_dht(event_id)
+            elif option == "4":
+                msg = f"leave-dht {self.peer_name}"
+                self.left_dht = True
+                self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
+                import time
+                time.sleep(1)
+
+                new_leader = input("Enter name of new leader to assign: ").strip()
+                rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
+                print(f"[SENT] Notifying manager of rebuilt ring: {rebuilt_msg}")
+                self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
             else:
                 print("Invalid choice. Please enter a valid number.")
 
@@ -88,7 +101,7 @@ class DHTPeer:
     # Manages appropriate response to command 
     def process_command(self, command):
         cmd_type = command[0]
-        resp_type = command[0]+" "+command[1]
+        resp_type = command[0] + " " + command[1] if len(command) > 1 else ""
         
         # If received command is set-id
         if cmd_type == "set-id":
@@ -141,6 +154,16 @@ class DHTPeer:
             print(f"[DEBUG] Sending find-event to {entry_ip}:{entry_pport} => {msg}")
             self.sock.sendto(msg.encode(), (entry_ip, entry_pport))
             return "Disregard"
+            
+        elif command[0] == "SUCCESS" and len(command) == 1:
+            if hasattr(self, "left_dht") and self.left_dht:
+                new_leader = input("Enter name of new leader to assign: ").strip()
+                rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
+                print(f"[SENT] Notifying manager: {rebuilt_msg}")
+                self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
+                self.left_dht = False
+            return "Disregard"
+
             
         else:
             return "FAILURE Invalid command"
@@ -380,6 +403,29 @@ class DHTPeer:
             print(f"[FORWARD] To {peer_name} at {peer_ip}:{peer_port} (hop {hops})")
             self.sock.sendto(forward_msg.encode(), (peer_ip, int(peer_port)))
             return "Disregard"
+            
+    def leave_dht(self):
+        message = f"leave-dht {self.peer_name}"
+        self.sock.sendto(message.encode(), (self.manager_ip, self.manager_port))
+
+        try:
+            response, _ = self.sock.recvfrom(1024)
+            if response.decode().startswith("FAILURE"):
+                print("[FAILURE]", response.decode())
+                return
+
+            print("[INFO] Leave approved by manager.")
+
+            # Choose a new leader (any peer in self.peers besides self)
+            new_leader_id = (self.id + 1) % self.ring_size
+            new_leader = self.peers[new_leader_id][0]  # name only
+
+            rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
+            print(f"[DEBUG] Sending dht-rebuilt to manager: {rebuilt_msg}")
+            self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
+
+        except Exception as e:
+            print("[ERROR] Failed to leave DHT:", e)
 
 if __name__ == "__main__":
     # port = int(input("Enter manager port number: (Range is 18000-18499)"))
