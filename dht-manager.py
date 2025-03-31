@@ -66,6 +66,8 @@ class DHTManager:
             return self.handle_setup_dht(command[1], int(command[2]), command[3])
         elif cmd_type == "dht-complete" and len(command) == 2:
             return self.handle_dht_complete(command[1])
+        elif cmd_type == "query-dht" and len(command) == 2:
+            return self.handle_query_dht(command[1])
         else:
             return "FAILURE Invalid command"
     
@@ -107,6 +109,19 @@ class DHTManager:
         if self.dht is None or self.dht[0] != peer_name:
             return "FAILURE Not the leader"
         return "SUCCESS 4"
+
+    def handle_query_dht(self, peer_name):
+        if self.dht is None:
+            return "FAILURE DHT not setup"
+        if peer_name not in self.peers:
+            return "FAILURE Peer not registered"
+        if self.peers[peer_name][3] != "Free":
+            return "FAILURE Peer not in Free state"
+    
+        # Choose a random peer in the DHT to start the query
+        selected = random.choice(self.dht)
+        selected_info = self.peers[selected]
+        return f"SUCCESS {selected} {selected_info[0]} {selected_info[2]}"
     
 if __name__ == "__main__":
     # port = int(input("Enter manager port number: (Range is 18000-18499)"))

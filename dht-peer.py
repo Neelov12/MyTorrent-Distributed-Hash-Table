@@ -63,6 +63,7 @@ class DHTPeer:
             print(f"\nPeer {peer_name}, enter a command at any time)")
             print("1: Exit")
             print("2: Set up DHT (setup-dht)")
+	    print("3: Query DHT for event_id")
             option = input("\nSelect an option: \n").strip()
 
             if option == "1": 
@@ -72,6 +73,9 @@ class DHTPeer:
                 n_size = input("Select size of hash table (integer): ")
                 y = input("Select year of storm data (YYYY): ")
                 peer.setup_dht(n_size, y)
+            elif option == "3":
+                event_id = input("Enter storm event ID to query: ").strip()
+                peer.query_dht(event_id)
             else:
                 print("Invalid choice. Please enter a valid number.")
 
