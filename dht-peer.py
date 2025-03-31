@@ -63,7 +63,7 @@ class DHTPeer:
             print(f"\nPeer {peer_name}, enter a command at any time)")
             print("1: Exit")
             print("2: Set up DHT (setup-dht)")
-	    print("3: Query DHT for event_id")
+            print("3: Query DHT for event_id")
             option = input("\nSelect an option: \n").strip()
 
             if option == "1": 
@@ -347,11 +347,3 @@ if __name__ == "__main__":
 
     # Starts multithreading socket and input from user 
     peer.start() 
-    
-
-
-
-
-        
-    
-
