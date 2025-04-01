@@ -39,22 +39,25 @@ class DHTPeer:
     # Manages listens and responses 
     def listen_loop(self):
         """Continuously listen for incoming UDP messages."""
-        print(f"{peer_name} is listening on port {p_port}...")
         while True:
             try:
                 data, addr = self.sock.recvfrom(1024)
-                command = data.decode().split()
-                if not command:
+                message = data.decode()
+                
+                # Skip processing if this is a response to our own command
+                if addr == (self.manager_ip, self.manager_port) and \
+                   (message.startswith("SUCCESS") or message.startswith("FAILURE")):
+                    print(f"[RESPONSE] From manager: {message}")
                     continue
-
-                print(f"[RECEIVED] From {addr}: {' '.join(command)}")
-
+                
+                # Process actual commands
+                command = message.split()
+                print(f"[RECEIVED] From {addr}: {message}")
                 response = self.process_command(command)
-                if command[0] == "FAILURE" or response == "Disregard":
-                    print("[SENT] No response sent\n")
-                else:
-                    print(f"[SENT] To {addr}: {response}\n")
+                if response and response != "Disregard":
+                    print(f"[SENT] To {addr}: {response}")
                     self.sock.sendto(response.encode(), addr)
+                
             except Exception as e:
                 print("[ERROR in listen_loop]", e)
 
@@ -90,6 +93,9 @@ class DHTPeer:
                 rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
                 print(f"[SENT] Notifying manager of rebuilt ring: {rebuilt_msg}")
                 self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
+                import time
+                time.sleep(1)
+                print("[INFO] DHT rebuild complete. You may now exit or rejoin another DHT.")
             else:
                 print("Invalid choice. Please enter a valid number.")
 
@@ -154,16 +160,6 @@ class DHTPeer:
             print(f"[DEBUG] Sending find-event to {entry_ip}:{entry_pport} => {msg}")
             self.sock.sendto(msg.encode(), (entry_ip, entry_pport))
             return "Disregard"
-            
-        elif command[0] == "SUCCESS" and len(command) == 1:
-            if hasattr(self, "left_dht") and self.left_dht:
-                new_leader = input("Enter name of new leader to assign: ").strip()
-                rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
-                print(f"[SENT] Notifying manager: {rebuilt_msg}")
-                self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
-                self.left_dht = False
-            return "Disregard"
-
             
         else:
             return "FAILURE Invalid command"
