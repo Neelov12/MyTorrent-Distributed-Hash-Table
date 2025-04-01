@@ -4,6 +4,7 @@ import random
 import threading
 import csv
 import hashlib
+import time
 
 # Define the allowed port range based on G = 34
 # For group 34 it is 18000-18499
@@ -69,6 +70,7 @@ class DHTPeer:
             print("2: Set up DHT (setup-dht)")
             print("3: Query DHT for event_id")
             print("4: Leave DHT (leave-dht)")
+            print("5: Join DHT (join-dht)")
             option = input("\nSelect an option: \n").strip()
 
             if option == "1": 
@@ -86,16 +88,25 @@ class DHTPeer:
                 msg = f"leave-dht {self.peer_name}"
                 self.left_dht = True
                 self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
-                import time
                 time.sleep(1)
 
                 new_leader = input("Enter name of new leader to assign: ").strip()
                 rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
                 print(f"[SENT] Notifying manager of rebuilt ring: {rebuilt_msg}")
                 self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
-                import time
                 time.sleep(1)
                 print("[INFO] DHT rebuild complete. You may now exit or rejoin another DHT.")
+            elif option == "5":
+                msg = f"join-dht {self.peer_name}"
+                self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
+                time.sleep(1)
+
+                new_leader = input("Enter name of current leader to assign: ").strip()
+                rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
+                print(f"[SENT] Notifying manager of ring rebuild: {rebuilt_msg}")
+                self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
+                time.sleep(1)
+                print("[INFO] DHT join complete. You are now part of the ring.")
             else:
                 print("Invalid choice. Please enter a valid number.")
 
