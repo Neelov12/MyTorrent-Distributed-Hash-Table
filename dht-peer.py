@@ -39,25 +39,25 @@ class DHTPeer:
     # Manages listens and responses 
     def listen_loop(self):
         """Continuously listen for incoming UDP messages."""
+        print(f"{peer_name} is listening on port {p_port}...")
         while True:
             try:
-                data, addr = self.sock.recvfrom(1024)
-                message = data.decode()
-                
-                # Skip processing if this is a response to our own command
-                if addr == (self.manager_ip, self.manager_port) and \
-                   (message.startswith("SUCCESS") or message.startswith("FAILURE")):
-                    print(f"[RESPONSE] From manager: {message}")
-                    continue
-                
-                # Process actual commands
-                command = message.split()
-                print(f"[RECEIVED] From {addr}: {message}")
-                response = self.process_command(command)
+                data, addr = self.sock.recvfrom(2048)
+                raw_message = data.decode().strip()
+
+                if addr == (self.manager_ip, self.manager_port):
+                    if raw_message in ["SUCCESS", "FAILURE"]:
+                        print(f"[MANAGER] {raw_message}")
+                        continue
+
+                # Print and process all other cases
+                print(f"[RECEIVED] From {addr}: {raw_message}")
+                response = self.process_command(raw_message.split())
+
                 if response and response != "Disregard":
                     print(f"[SENT] To {addr}: {response}")
                     self.sock.sendto(response.encode(), addr)
-                
+
             except Exception as e:
                 print("[ERROR in listen_loop]", e)
 
