@@ -5,6 +5,7 @@ import threading
 import csv
 import hashlib
 import time
+import os
 
 # Define the allowed port range based on G = 34
 # For group 34 it is 18000-18499
@@ -40,7 +41,7 @@ class DHTPeer:
     # Manages listens and responses 
     def listen_loop(self):
         """Continuously listen for incoming UDP messages."""
-        print(f"{peer_name} is listening on port {p_port}...")
+        print(f"{self.peer_name} is listening on port {self.p_port}...")
         while True:
             try:
                 data, addr = self.sock.recvfrom(2048)
@@ -65,12 +66,13 @@ class DHTPeer:
     def input_loop(self):
         # Prompts user to issue command to manager
         while True: 
-            print(f"\nPeer {peer_name}, enter a command at any time)")
+            print(f"\nPeer {self.peer_name}, enter a command at any time)")
             print("1: Exit")
             print("2: Set up DHT (setup-dht)")
             print("3: Query DHT for event_id")
             print("4: Leave DHT (leave-dht)")
             print("5: Join DHT (join-dht)")
+            print("6: Deregister and Exit (deregister)")
             option = input("\nSelect an option: \n").strip()
 
             if option == "1": 
@@ -107,6 +109,21 @@ class DHTPeer:
                 self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
                 time.sleep(1)
                 print("[INFO] DHT join complete. You are now part of the ring.")
+            elif option == "6":
+                msg = f"deregister {self.peer_name}"
+                self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
+                try:
+                    response, _ = self.sock.recvfrom(1024)
+                    response_text = response.decode().strip()
+                    print(f"[MANAGER] {response_text}")
+                    if response_text.startswith("SUCCESS"):
+                        print("[INFO] Successfully deregistered. Exiting...")
+                        self.sock.close()      
+                        os._exit(0)            
+                    else:
+                        print("[FAILURE] Deregistration failed. You must be Free to deregister.")
+                except Exception as e:
+                    print("[ERROR] Failed to deregister:", e)
             else:
                 print("Invalid choice. Please enter a valid number.")
 
@@ -387,7 +404,7 @@ class DHTPeer:
         origin_port = int(command[4])
         hops = int(command[5])
 
-        pos = event_id % self.next_prime(2 * 1000)  # You may refine this if needed
+        pos = event_id % self.next_prime(2 * 1000)
         target_id = pos % self.ring_size
 
         if self.id == target_id:

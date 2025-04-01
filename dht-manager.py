@@ -76,6 +76,8 @@ class DHTManager:
             return self.handle_dht_rebuilt(command[1], command[2])
         elif cmd_type == "join-dht" and len(command) == 2:
             return self.handle_join_dht(command[1])
+        elif cmd_type == "deregister" and len(command) == 2:
+            return self.handle_deregister(command[1])
         else:
             return "FAILURE Invalid command"
     
@@ -191,6 +193,14 @@ class DHTManager:
             return "FAILURE Another leave/join already in progress"
 
         self.joining_peer = peer_name
+        return "SUCCESS"
+        
+    def handle_deregister(self, peer_name):
+        if peer_name not in self.peers:
+            return "FAILURE Peer not registered"
+        if self.peers[peer_name][3] != "Free":
+            return "FAILURE Peer must be Free to deregister"
+        del self.peers[peer_name]
         return "SUCCESS"
 
     
