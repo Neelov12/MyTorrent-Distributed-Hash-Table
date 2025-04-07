@@ -14,8 +14,8 @@ class DHTManager:
             raise ValueError(f"Port {port} is out of the allowed range {PORT_RANGE}")
         
         self.port = port
-        self.peers = {}  # Stores peer information {peer_name: (ip, m_port, p_port, state)}
-        self.dht = None  # Stores current DHT setup
+        self.peers = {}  # Stores peer information {peers[peer_name]: (ip, m_port, p_port, state)}
+        self.dht = None  # Stores the peer_name of all peers in current DHT 
         self.leaving_peer = None
         self.joining_peer = None
     
@@ -24,10 +24,19 @@ class DHTManager:
         print(f"The IP address of the DHT Manger is: {socket.gethostbyname(socket.gethostname())}") 
         print(f"DHT Manager listening on port {port}...")
 
+        # Toggles listen_loop listener on/off
+        #   Usually used to stop listening to new commands, returning FAILURE otherwise
+        self.listen = True
+
+        # Sets what command the manager is waiting for, manager sends FAILURE if received command does not match waiting_on
+        #   Empty string indicates that the manager is not waiting on any specific command
+        self.waiting_on = ""
+
+# LISTEN LOOP
     # Manages listens and responses 
     def listen_loop(self):
         """Continuously listen for incoming UDP messages."""
-        while True:
+        while self.listen:
             try:
                 data, addr = self.sock.recvfrom(1024)
                 command = data.decode().split()
@@ -41,6 +50,7 @@ class DHTManager:
             except Exception as e:
                 print("[ERROR in listen_loop]", e)
 
+# INPUT LOOP 
     def input_loop(self):
         """Handle user input for sending messages or exiting."""
         while True:
@@ -49,18 +59,30 @@ class DHTManager:
 
             if choice == "1":
                 print("Exiting program...")
+                # Sends command to all registered peers to also exit
+                message = "force-exit ManagerForcedExit"
+                for peer_name, (ip, m_port, p_port, state) in self.peers.items():
+                    self.sock.sendto(message.encode(), (ip, p_port))
                 exit(0)
             else:
                 print("Invalid choice. Please enter 1 to exit.")
 
+# START
     def start(self):
         """Start listening and input threads."""
         threading.Thread(target=self.listen_loop, daemon=True).start()
         self.input_loop()  # Run input loop on main thread (so user can Ctrl+C)
     
+# PROCESS COMMAND
     # Manages responses to commands 
     def process_command(self, command):
         cmd_type = command[0]
+        
+        # Checks if manager is waiting on a specific command
+        #   if it is but incoming command does not match the message it's waiting on, it returns FAILURE
+        if self.waiting_on != "":
+            if cmd_type != self.waiting_on:
+                return f"FAILURE Manager is waiting for {self.waiting_on}"
         
         if cmd_type == "register" and len(command) == 5:
             return self.handle_register(command[1], command[2], int(command[3]), int(command[4]))
@@ -78,10 +100,14 @@ class DHTManager:
             return self.handle_join_dht(command[1])
         elif cmd_type == "deregister" and len(command) == 2:
             return self.handle_deregister(command[1])
+        elif cmd_type == "teardown-dht" and len(command) == 2: 
+            return self.handle_teardown_dht(command[1])
+        elif cmd_type == "teardown-complete" and len(command) == 2: 
+            return self.handle_teardown_complete(command[1])
         else:
             return "FAILURE Invalid command"
     
-    # REGISTER (Receive) 
+# Handle register (Receive) 
     def handle_register(self, peer_name, ip, m_port, p_port):
         # Output packet sent and received 
         if peer_name in self.peers or any(p[1] == ip and (p[2] == m_port or p[3] == p_port) for p in self.peers.values()):
@@ -90,6 +116,7 @@ class DHTManager:
         self.peers[peer_name] = (ip, m_port, p_port, "Free")
         return "SUCCESS"
     
+# Handle setup-dht    
     def handle_setup_dht(self, leader, n, year):
         if leader not in self.peers or self.peers[leader][3] != "Free":
             return "FAILURE Leader not valid"
@@ -115,6 +142,7 @@ class DHTManager:
         dht_info = [(p, *self.peers[p][:3]) for p in self.dht]
         return "SUCCESS 2 " + " ".join(["(" + ",".join(map(str, peer)) + ")" for peer in dht_info])
     
+# Handle dht-complete
     def handle_dht_complete(self, peer_name):
         if self.dht is None or self.dht[0] != peer_name:
             return "FAILURE Not the leader"
@@ -122,6 +150,7 @@ class DHTManager:
             self.peers[p] = (*self.peers[p][:3], "Free")
         return "SUCCESS 4"
 
+# Handle query-dht
     def handle_query_dht(self, peer_name):
         if self.dht is None:
             return "FAILURE DHT not setup"
@@ -134,7 +163,8 @@ class DHTManager:
         selected = random.choice(self.dht)
         selected_info = self.peers[selected]
         return f"SUCCESS {selected} {selected_info[0]} {selected_info[2]}"
-        
+    
+# Handle leave-dht 
     def handle_leave_dht(self, peer_name):
         if self.dht is None or peer_name not in self.dht:
             return "FAILURE Peer not in DHT"
@@ -142,8 +172,10 @@ class DHTManager:
             return "FAILURE Another leave/join already in progress"
         
         self.leaving_peer = peer_name
+        self.waiting_on = "dht-rebuilt"
         return "SUCCESS"
-        
+
+# Handle dht-rebuilt
     def handle_dht_rebuilt(self, peer_name, new_leader):
         
         if self.joining_peer is not None:
@@ -151,6 +183,8 @@ class DHTManager:
                 return "FAILURE Rebuilder mismatch"
             if new_leader not in self.dht:
                 return "FAILURE New leader not valid"
+            
+            self.waiting_on = ""
 
             self.peers[self.joining_peer] = (*self.peers[self.joining_peer][:3], "InDHT")
             self.dht.append(self.joining_peer)
@@ -184,6 +218,7 @@ class DHTManager:
         self.leaving_peer = None
         return "SUCCESS"
         
+# Handle join-dht
     def handle_join_dht(self, peer_name):
         if self.dht is None:
             return "FAILURE No DHT exists"
@@ -194,7 +229,8 @@ class DHTManager:
 
         self.joining_peer = peer_name
         return "SUCCESS"
-        
+
+# Handle deregister
     def handle_deregister(self, peer_name):
         if peer_name not in self.peers:
             return "FAILURE Peer not registered"
@@ -202,6 +238,33 @@ class DHTManager:
             return "FAILURE Peer must be Free to deregister"
         del self.peers[peer_name]
         return "SUCCESS"
+    
+# Handle teardown_dht <peer_name>     
+    def handle_teardown_dht(self, peer_name):
+        # Checks if peer is leader
+        if self.peers[peer_name][3] != "Leader":
+            return "FAILURE Peer must be a Leader"
+        else: 
+            # Set manager waiting on command to teardown-complete so it sends FAILURE to all other incoming messages
+            self.waiting_on = "teardown-complete"
+            # Return SUCCESS so leader can proceed with teardown
+            return "SUCCESS"         
+
+# Handle teardown_complete <peer_name> 
+    def handle_teardown_complete(self, peer_name):
+        # Checks if peer is leader
+        if self.peers[peer_name][3] != "Leader":
+            return "FAILURE Peer must be a Leader"
+        else:
+            # Reset self.waiting_on so manager can start processing other commands
+            self.waiting_on = ""    
+            # Set each peer in DHT's state to Free
+            for peer_name in self.dht:
+                peer_ip, m_port, p_port, _ = self.peers[peer_name]  # Unpack existing values
+                self.peers[peer_name] = (peer_ip, m_port, p_port, "Free")  # Update state
+            # Return SUCCESS message
+            return "SUCCESS"
+
 
     
 if __name__ == "__main__":

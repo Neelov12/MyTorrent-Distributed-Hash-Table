@@ -15,17 +15,28 @@ PORT_RANGE = range(((G // 2) * 1000) + 1000, ((G // 2) * 1000) + 1499)
 class DHTPeer: 
     def __init__(self, manager_ip, manager_port, peer_name, peer_ip, m_port, p_port):
 
+        # Peer/Manager network information 
         self.manager_ip = manager_ip
         self.manager_port = manager_port
         self.peer_name = peer_name
         self.peer_ip = peer_ip
         self.m_port = m_port
         self.p_port = p_port
-        self.peers = {}  # Stores peer info in the ring
-        self.local_dht = {}  # Local hash table for storm data
-        self.id = None
+
+        # List of peers, used by leader
+        self.peers = {}  # Stores peer info in the ring, 
+                         # Structure: self.peers[id] = peer_name, peer_ip, peer_port 
+
+        # Local DHT table
+        self.local_dht = {}  # Local hash table for storm data,
+                             # Structure: local_dht[pos] = {event_id, state, ... , tor_f_scale}
+        
+        # Internal DHT information, its own id, DHT ring size, and its own right neighbor
+        self.id = None # Leader id is always set to 0
         self.ring_size = None
-        self.right_neighbor = None
+        self.right_neighbor = None # Structure: n_name, n_ip, n_port
+
+        # Information for CSV file
         self.CSV_FILE = "details-1950.csv"
         self.REQUIRED_FIELDS = [
             "EVENT_ID", "STATE", "YEAR", "MONTH_NAME", "EVENT_TYPE", "CZ_TYPE", "CZ_NAME",
@@ -33,29 +44,45 @@ class DHTPeer:
             "DAMAGE_PROPERTY", "DAMAGE_CROPS", "TOR_F_SCALE"
         ]
 
+        # Establish socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", p_port))
+
+        # Internal tracking, whether peer left dht or not
         self.left_dht = False
 
+        # Toggles peer socket listener (in listen_loop()) on/off
+        self.listen = True
 
-    # Manages listens and responses 
+        # These two variables control what the peer is expecting to receive and do as a response
+        #   This finetuning is since there may be more than one response to a message, for example "SUCCESS"
+        self.waiting_on = ""
+        self.waiting_to_send = ""
+
+# START
+#   Begins multithreading
+    def start(self):
+        """Start listening and input threads."""
+        threading.Thread(target=self.listen_loop, daemon=True).start()
+        self.input_loop()  # Run input loop on main thread (so user can Ctrl+C)
+
+# LISTEN LOOP
+#   Listens for commands and sends responses 
     def listen_loop(self):
         """Continuously listen for incoming UDP messages."""
         print(f"{self.peer_name} is listening on port {self.p_port}...")
-        while True:
+        while self.listen:
             try:
                 data, addr = self.sock.recvfrom(2048)
                 raw_message = data.decode().strip()
-
-                if addr == (self.manager_ip, self.manager_port):
-                    if raw_message in ["SUCCESS", "FAILURE"]:
-                        print(f"[MANAGER] {raw_message}")
-                        continue
+                if not raw_message:
+                    continue
 
                 # Print and process all other cases
                 print(f"[RECEIVED] From {addr}: {raw_message}")
                 response = self.process_command(raw_message.split())
 
+                # Sends nothing if "Disregard", else sends response given by process_command
                 if response and response != "Disregard":
                     print(f"[SENT] To {addr}: {response}")
                     self.sock.sendto(response.encode(), addr)
@@ -63,80 +90,41 @@ class DHTPeer:
             except Exception as e:
                 print("[ERROR in listen_loop]", e)
 
-    def input_loop(self):
-        # Prompts user to issue command to manager
-        while True: 
-            print(f"\nPeer {self.peer_name}, enter a command at any time)")
-            print("1: Exit")
-            print("2: Set up DHT (setup-dht)")
-            print("3: Query DHT for event_id")
-            print("4: Leave DHT (leave-dht)")
-            print("5: Join DHT (join-dht)")
-            print("6: Deregister and Exit (deregister)")
-            option = input("\nSelect an option: \n").strip()
-
-            if option == "1": 
-                sys.exit() 
-                break
-            elif option == "2":
-                n_size = input("Select size of hash table (integer): ")
-                y = input("Select year of storm data (YYYY): ")
-                peer.setup_dht(n_size, y)
-            elif option == "3":
-                event_id = input("Enter storm event ID to query: ").strip()
-                self.last_queried_event_id = event_id
-                peer.query_dht(event_id)
-            elif option == "4":
-                msg = f"leave-dht {self.peer_name}"
-                self.left_dht = True
-                self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
-                time.sleep(1)
-
-                new_leader = input("Enter name of new leader to assign: ").strip()
-                rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
-                print(f"[SENT] Notifying manager of rebuilt ring: {rebuilt_msg}")
-                self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
-                time.sleep(1)
-                print("[INFO] DHT rebuild complete. You may now exit or rejoin another DHT.")
-            elif option == "5":
-                msg = f"join-dht {self.peer_name}"
-                self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
-                time.sleep(1)
-
-                new_leader = input("Enter name of current leader to assign: ").strip()
-                rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
-                print(f"[SENT] Notifying manager of ring rebuild: {rebuilt_msg}")
-                self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
-                time.sleep(1)
-                print("[INFO] DHT join complete. You are now part of the ring.")
-            elif option == "6":
-                msg = f"deregister {self.peer_name}"
-                self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
-                try:
-                    response, _ = self.sock.recvfrom(1024)
-                    response_text = response.decode().strip()
-                    print(f"[MANAGER] {response_text}")
-                    if response_text.startswith("SUCCESS"):
-                        print("[INFO] Successfully deregistered. Exiting...")
-                        self.sock.close()      
-                        os._exit(0)            
-                    else:
-                        print("[FAILURE] Deregistration failed. You must be Free to deregister.")
-                except Exception as e:
-                    print("[ERROR] Failed to deregister:", e)
-            else:
-                print("Invalid choice. Please enter a valid number.")
-
-    def start(self):
-        """Start listening and input threads."""
-        threading.Thread(target=self.listen_loop, daemon=True).start()
-        self.input_loop()  # Run input loop on main thread (so user can Ctrl+C)
-
-    # Manages appropriate response to command 
+# PROCESS COMMAND
+#   Processes commands and manages appropriate response 
     def process_command(self, command):
         cmd_type = command[0]
         resp_type = command[0] + " " + command[1] if len(command) > 1 else ""
         
+        # Checks if peer is waiting on a specific command or status message
+        if self.waiting_on != "":
+            # If it's waiting for a command, peer sends the corresponding response command or calls the right function
+            if cmd_type == self.waiting_on:
+                if self.waiting_to_send.startswith("[INFO]"):
+                    print(self.waiting_to_send) # Prints INFO message instead of sending anything
+                    self.waiting_on  = ""
+                    self.waiting_to_send = ""
+                    return "Disregard"    
+                if self.waiting_to_send.startswith("force-exit"):
+                    self.force_exit(self.waiting_to_send.replace("force-exit ", ""))
+                if self.waiting_to_send == "reset-id":
+                    return self.reset_id()
+                elif self.waiting_to_send == "rebuild-dht":
+                    return self.rebuild_dht()
+                elif self.waiting_to_send == "initiate_teardown":
+                    return self.initiate_teardown()                
+                elif self.waiting_to_send == "teardown":
+                    return self.teardown()
+                elif self.waiting_to_send == "teardown-complete":
+                    return self.teardown_complete()
+            else: 
+                print(f"[ERROR] Received {cmd_type} but expected {self.waiting_on}")
+                self.waiting_on = ""
+                self.waiting_to_send = ""
+                return "Disregard"
+
+        # If peer is not waiting on a specific command and will process any command: 
+            
         # If received command is set-id
         if cmd_type == "set-id":
             return self.handle_set_id(command)
@@ -188,20 +176,91 @@ class DHTPeer:
             print(f"[DEBUG] Sending find-event to {entry_ip}:{entry_pport} => {msg}")
             self.sock.sendto(msg.encode(), (entry_ip, entry_pport))
             return "Disregard"
-            
+        elif command[0] == "rebuild-dht" and len(command) == 1:
+            return self.handle_rebuild_dht()
+        elif command[0] == "reset-id" and len(command) == 3:
+            return self.handle_reset_id(command[1], command[2])
+        elif command[0] == "teardown" and len(command) == 1:
+            return self.handle_teardown()
+        elif command[0] == "SUCCESS":
+            return "Disregard"
+        elif command[0] == "force-exit":
+            self.force_exit(command[1])
+            return "Disregard"
         else:
             return "FAILURE Invalid command"
 
-    # REGISTER (Send) 
+# INPUT LOOP
+#   Manages sending commands based on user input
+    def input_loop(self):
+        # Prompts user to issue command to manager
+        while True: 
+            time.sleep(1)
+            print(f"\nPeer {self.peer_name}, enter a command at any time)")
+            print("1: Force Exit")
+            print("2: Set up DHT (setup-dht)")
+            print("3: Query DHT for event_id")
+            print("4: Leave DHT (leave-dht)")
+            print("5: Join DHT (join-dht)")
+            print("6: Deregister and Exit (deregister)")
+            print("7: Delete entire DHT (teardown-dht)")
+            option = input("\nSelect an option: \n").strip()
+
+            if option == "1": 
+                sys.exit() 
+                break
+            elif option == "2":
+                n_size = input("Select size of hash table (integer): ")
+                y = input("Select year of storm data (YYYY): ")
+                peer.setup_dht(n_size, y)
+            elif option == "3":
+                event_id = input("Enter storm event ID to query: ").strip()
+                self.last_queried_event_id = event_id
+                peer.query_dht(event_id)
+            elif option == "4":
+                self.leave_dht()
+                print("[INFO] DHT rebuild complete. You may now exit or rejoin another DHT.")
+            elif option == "5":
+                msg = f"join-dht {self.peer_name}"
+                self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
+                time.sleep(1)
+
+                new_leader = input("Enter name of current leader to assign: ").strip()
+                rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
+                print(f"[SENT] Notifying manager of ring rebuild: {rebuilt_msg}")
+                self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
+                time.sleep(1)
+                print("[INFO] DHT join complete. You are now part of the ring.")
+            elif option == "6":
+                peer.deregister()
+            elif option == "7":
+                peer.teardown_dht()
+            else:
+                print("Invalid choice. Please enter a valid number.")
+
+# Used to force exit program 
+    def force_exit(self, exit_msg):
+        print(exit_msg)
+        os._exit(0)
+        
+# Send register 
     # (peer_name, peer ip, m_port, p_port) 
     def register(self):
         """Register with the DHT manager."""
         message = f"register {self.peer_name} {self.peer_ip} {self.m_port} {self.p_port}"
+        self.waiting_on = "SUCCESS"
+        self.waiting_to_send = "[INFO] Successfully registered"
         self.sock.sendto(message.encode(), (self.manager_ip, self.manager_port))
-        response, _ = self.sock.recvfrom(1024)
-        print("Manager Response:", response.decode())
 
-    # SETUP-DHT (Send)
+# Send deregister
+    def deregister(self):
+        # After sending deregister, wait for SUCCESS then exit program
+        self.waiting_on = "SUCCESS"
+        self.waiting_to_send = "force_exit [INFO] Successfully deregistered from manager, exiting..."
+        msg = f"deregister {self.peer_name}"
+        self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
+
+# Send setup-dht
     # (peer_name, n, yyyy)
     def setup_dht(self, n, year):
         """Send setup-dht request to the manager."""
@@ -220,6 +279,7 @@ class DHTPeer:
         print("[INFO] DHT Ring Established:", self.peers)
         return self.set_ids()
 
+# Send set-id
     # Assign ids to all the peers 
     def set_ids(self):
         """Assign IDs to peers and establish the ring topology."""
@@ -305,9 +365,9 @@ class DHTPeer:
                 filtered_records.append(filtered_tuple)
         return filtered_records
     
-    # Send store command 
+# Send store 
     def store(self, peer_id, pos, rec):
-        """Handle incoming set-id command from leader."""
+        """Used by leader to send store command to right neighbor."""
         if peer_id not in self.peers:
             print(f"[WARN] Peer ID {peer_id} not found in ring.")
             return
@@ -320,11 +380,11 @@ class DHTPeer:
         print(f"[SENT] To {n_name} at {n_port}: {store_msg}")
         self.sock.sendto(store_msg.encode(), (n_ip, int(n_port)))
 
+# Send dht-complete <peer_name>
     def dht_complete(self):
         return f"dht-complete {self.peer_name}"
 
-
-    # Handles set-id commands from peer leader
+# Handles set-id 
     def handle_set_id(self, command):
         # Sets id and ring size to id and ring size sent by leader
         self.id = int(command[1])
@@ -352,7 +412,7 @@ class DHTPeer:
         #return f"SUCCESS 3 Assigned-ID:{self.id} Ring size:{self.ring_size} Right neighbor (ID {next_id}): {self.right_neighbor}"
         return "Disregard"
 
-    # Handles store commands 
+# Handles store 
     def handle_store(self, command):
         # store command structure = store <peer_id> <pos> <rec> 
         peer_id = int(command[1])        
@@ -428,28 +488,173 @@ class DHTPeer:
             self.sock.sendto(forward_msg.encode(), (peer_ip, int(peer_port)))
             return "Disregard"
             
+# Sends leave-dht <peer_name> 
+#   to manager and waits for SUCCESS
     def leave_dht(self):
         message = f"leave-dht {self.peer_name}"
+        # After sending leave-dht, waits for SUCCESS then sends teardown to right neighbor 
+        self.waiting_on = "SUCCESS"
+        self.waiting_to_send = "initiate_teardown"
         self.sock.sendto(message.encode(), (self.manager_ip, self.manager_port))
 
-        try:
-            response, _ = self.sock.recvfrom(1024)
-            if response.decode().startswith("FAILURE"):
-                print("[FAILURE]", response.decode())
-                return
+    # Step 1 of leave-dht 
+    def initiate_teardown(self):
+        # Makes it so that peer knows to send reset-id after teardown is complete and cycles to itself
+        self.waiting_on = "teardown"
+        self.waiting_to_send = "reset-id"
+        self.teardown()
+    
+    # Step 2 of leave-dht
+    #   Only used by leaving peer 
+    def reset_id(self):
+        # Deletes local DHT
+        self.local_dht = {}
+        # Will now send rebuild-dht after receiving reset-id from last node in ring 
+        self.waiting_on = "reset-id"
+        self.waiting_to_send = "rebuild-dht"
+        # Sends reset-id <new_peer_id> <leaving_peer_id> to right neighbor
+        n_name, n_ip, n_port = self.right_neighbor 
+        reset_id_msg = f"reset-id 0 {self.id}"
+        print(f"[SENT] reset-id 0 {self.id} to {n_name} at {n_port}: {reset_id_msg}")
+        self.sock.sendto(reset_id_msg.encode(), (n_ip, int(n_port)))
+        # No response needs to be sent back to manager
+        return "Disregard"
+    
+    def handle_reset_id(self, new_id, leaving_id):
+        # Set new peer id and new neighbor id 
+        old_id = self.id
+        self.id = int(new_id)
+        new_neighbor_id = self.id + 1
+        # Set ring size - 1
+        old_ring_size = self.ring_size
+        new_ring_size = old_ring_size - 1
+        self.ring_size = new_ring_size
+        # Adjust peer tuples, removing leaving peer and reorder self.peers
+        new_peers = {}
+        for i in range(new_ring_size):
+            newer_id = i
+            older_id = (leaving_id + i + 1) % old_ring_size
+            new_peers[newer_id] = self.peers[older_id]
+        self.peers = new_peers
+        # For now, leave right neighbor the same as reset-id has to be forwarded back to leaving peer 
+        # Forward reset-id to right neighbor
+        n_name, n_ip, n_port = self.right_neighbor 
+        reset_id_msg = f"reset-id {new_neighbor_id} {leaving_id}"
+        print(f"[SENT] reset-id {new_neighbor_id} {leaving_id} to {n_name} at {n_port}: {reset_id_msg}")
+        self.sock.sendto(reset_id_msg.encode(), (n_ip, int(n_port)))
+        # Now, change right neighbor so that no more messages are sent to the leaving peer
+        self.right_neighbor = self.peers[self.id+1 % self.ring_size]     
+        # Print summary of changes
+        print(f"[SUMMARY] My information has been changed in the following way:")
+        print(f"            - ID: {old_id} -> {new_id}")
+        print(f"            - Ring size: {old_ring_size} -> {new_ring_size}")   
+        print(f"            - Right neighbor: {n_name} -> {self.right_neighbor[0]}")   
+        # No response needs to be sent back to left neighbor
+        return "Disregard"
+    
+    # Step 3 of leave-dht
+    def rebuild_dht(self):
+        # After sending rebuild-dht to new leader, peer waits for SUCCESS message from new leader
+        #   then sends dht-rebuilt to manager
+        self.waiting_on = "SUCCESS"
+        self.waiting_to_send = "dht-rebuilt"
+        # Send to right neighbor
+        n_name, n_ip, n_port = self.right_neighbor 
+        rebuild_dht_msg = f"rebuild-dht"
+        print(f"[SENT] rebuild-dht to {n_name} at {n_port}: {rebuild_dht_msg}")
+        self.sock.sendto(rebuild_dht_msg.encode(), (n_ip, int(n_port)))        
+        return "Disregard"
+    
+    # Meant only for new leader
+    def handle_rebuild_dht(self):
+        # Respond back to leaving peer 
+        return "SUCCESS"
+    
+    # Step 4 of leave-dht 
+    def dht_rebuilt(self):
+        # Sets the new leader
+        new_leader_name = self.right_neighbor[0] 
+        # Resets all DHT P2P variables so it is ready if peer wants to rejoin DHT 
+        # List of peers, used by leader
+        self.peers = {}         
+        self.local_dht = {}  
+        self.id = None 
+        self.ring_size = None
+        self.right_neighbor = None 
+        # Sets left_dht to True so it is tracked that this peer has at one point left a DHT
+        self.left_dht = True        
+        # After sending dht-rebuilt <new_leader_name>, waits for SUCCESS, then sends INFO message to console 
+        #   These variables are reset in listen_loop
+        self.waiting_on = "SUCCESS"
+        self.waiting_to_send = "[INFO] Manager confirms I have left the DHT and that DHT has been rebuilt"
+        # Sends dht-rebuilt <new_leader_name>
+        dht_rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader_name}"
+        self.sock.sendto(dht_rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
+        return "Disregard"
+    
+# Send teardown_dht <peer_name>
+#   Used by leader to tear down the entire DHT
+    def teardown_dht(self):
+        if self.id != 0:
+            print("[WARNING] You are not the leader")
 
-            print("[INFO] Leave approved by manager.")
+        # Sends teardown-dht <peer_name> command to manager 
+        teardown_to_man_msg = f"teardown-dht {self.peer_name}"
+        print(f"[SENT] teardown-dht to manager: {teardown_to_man_msg}")
+        # Waits for SUCCESS / FAILURE response from manager then waits to send teardown to neighbor 
+        self.waiting_on = "SUCCESS"
+        self.waiting_to_send = "teardown"
+        self.sock.sendto(teardown_to_man_msg.encode(), (self.manager_ip, self.manager_port))
 
-            # Choose a new leader (any peer in self.peers besides self)
-            new_leader_id = (self.id + 1) % self.ring_size
-            new_leader = self.peers[new_leader_id][0]  # name only
+# Sends teardown
+    def teardown(self):
+        # Sets peer to be waiting on teardown command once it cycles the ring
+        self.waiting_on = "teardown"
+        # Determines if teardown is being called by teardown_dht or leave_dht 
+        if(self.waiting_to_send != "reset-id"):
+            if self.id == 0:
+                self.waiting_to_send = "teardown-complete"
+            else: 
+                self.waiting_to_send = ""
 
-            rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader}"
-            print(f"[DEBUG] Sending dht-rebuilt to manager: {rebuilt_msg}")
-            self.sock.sendto(rebuilt_msg.encode(), (self.manager_ip, self.manager_port))
+        # Sends teardown to right neighbor
+        n_name, n_ip, n_port = self.right_neighbor 
+        teardown_msg = "teardown"
+        print(f"[SENT] teardown to {n_name} at {n_port}: {teardown_msg}")
+        self.sock.sendto(teardown_msg.encode(), (n_ip, int(n_port)))
+        # No response needs to be sent back to left neighbor / manager
+        return "Disregard"
 
-        except Exception as e:
-            print("[ERROR] Failed to leave DHT:", e)
+# Handles teardown
+    def handle_teardown(self):
+        self.local_dht = {} # Delete local DHT
+        # If receiving peer is the one that initially sent the teardown command
+        if self.waiting_on == "teardown":
+            self.waiting_on = "" # Reset peer to not wait on anything
+        # Otherwise if peer did not initialize teardown, forward command to neighbor
+        else: 
+            n_name, n_ip, n_port = self.right_neighbor 
+            teardown_msg = "teardown"
+            print(f"[SENT] teardown to {n_name} at {n_port}: {teardown_msg}")
+            self.sock.sendto(teardown_msg.encode(), (n_ip, int(n_port)))
+        # No response needs to be sent back to left neighbor
+        return "Disregard"
+
+# Sends teardown_complete <peer_name> to manager
+    def teardown_complete(self):
+        # Leader deletes own local DHT 
+        self.local_dht = {}
+        # Sends teardown-complete <peer_name> command to manager 
+        teardown_to_man_msg = f"teardown-complete {self.peer_name}"
+        print(f"[SENT] teardown-complete to manager: {teardown_to_man_msg}")
+        # Waits and listens for SUCCESS / FAILURE response from manager
+        #   waiting_to_send = "[INFO]..." means console will print message to indicate success, it will not send to a node
+        self.waiting_on = "SUCCESS"
+        self.waiting_to_send = "[INFO] Manager has accepted teardown-complete"        
+        self.sock.sendto(teardown_to_man_msg.encode(), (self.manager_ip, self.manager_port))
+        
+        # No response needs to be sent back to left neighbor 
+        return "Disregard"
 
 if __name__ == "__main__":
     # port = int(input("Enter manager port number: (Range is 18000-18499)"))
