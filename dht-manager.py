@@ -46,7 +46,8 @@ class DHTManager:
                 response = self.process_command(command)
                 print(f"[RECEIVED] From {addr}: {' '.join(command)}")
                 print(f"[SENT] {response}\n")
-                self.sock.sendto(response.encode(), addr)
+                if response != "NO RESPONSE":
+                    self.sock.sendto(response.encode(), addr)
             except Exception as e:
                 print("[ERROR in listen_loop]", e)
 
@@ -55,6 +56,7 @@ class DHTManager:
         """Handle user input for sending messages or exiting."""
         while True:
             print("\nEnter '1' at any time to exit")
+            print("\nEnter '2' at any time to print information")
             choice = input("").strip()
 
             if choice == "1":
@@ -62,8 +64,13 @@ class DHTManager:
                 # Sends command to all registered peers to also exit
                 message = "force-exit ManagerForcedExit"
                 for peer_name, (ip, m_port, p_port, state) in self.peers.items():
-                    self.sock.sendto(message.encode(), (ip, p_port))
+                    self.sock.sendto(message.encode(), (ip, m_port))
                 exit(0)
+            if choice == "2": 
+                print("REGISTERED PEERS WITH MANAGER:")
+                print(self.peers)
+                print("PEERS THAT ARE IN THE DHT:")
+                print(self.dht)
             else:
                 print("Invalid choice. Please enter 1 to exit.")
 
@@ -104,6 +111,8 @@ class DHTManager:
             return self.handle_teardown_dht(command[1])
         elif cmd_type == "teardown-complete" and len(command) == 2: 
             return self.handle_teardown_complete(command[1])
+        elif cmd_type == "FAILURE": 
+            return "NO RESPONSE"
         else:
             return "FAILURE Invalid command"
     
@@ -132,11 +141,13 @@ class DHTManager:
         # Randomly select n-1 available peers 
         selected_peers = random.sample(available_peers, n - 1)
         # Set leader peer to state "Leader"
-        self.peers[leader] = (*self.peers[leader][:3], "Leader")
+        ip, m_port, p_port, _ = self.peers[leader]  # unpack everything except old state
+        self.peers[leader] = (ip, m_port, p_port, "InDHT")
         
         # Set all selected peers to state "InDHT"
         for p in selected_peers:
-            self.peers[p] = (*self.peers[p][:3], "InDHT")
+            ip, m_port, p_port, _ = self.peers[p]
+            self.peers[p] = (ip, m_port, p_port, "InDHT")
         
         self.dht = [leader] + selected_peers
         dht_info = [(p, *self.peers[p][:3]) for p in self.dht]
