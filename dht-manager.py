@@ -55,8 +55,7 @@ class DHTManager:
     def input_loop(self):
         """Handle user input for sending messages or exiting."""
         while True:
-            print("\nEnter '1' at any time to exit")
-            print("\nEnter '2' at any time to print information")
+            print("\nEnter '1' at any time to exit, '2' at any time to print information")
             choice = input("").strip()
 
             if choice == "1":
@@ -140,14 +139,6 @@ class DHTManager:
         available_peers = [p for p in self.peers if self.peers[p][3] == "Free" and p != leader]
         # Randomly select n-1 available peers 
         selected_peers = random.sample(available_peers, n - 1)
-        # Set leader peer to state "Leader"
-        ip, m_port, p_port, _ = self.peers[leader]  # unpack everything except old state
-        self.peers[leader] = (ip, m_port, p_port, "InDHT")
-        
-        # Set all selected peers to state "InDHT"
-        for p in selected_peers:
-            ip, m_port, p_port, _ = self.peers[p]
-            self.peers[p] = (ip, m_port, p_port, "InDHT")
         
         self.dht = [leader] + selected_peers
         dht_info = [(p, *self.peers[p][:3]) for p in self.dht]
@@ -157,9 +148,14 @@ class DHTManager:
     def handle_dht_complete(self, peer_name):
         if self.dht is None or self.dht[0] != peer_name:
             return "FAILURE Not the leader"
+        # Set state of all peers in DHT to InDHT
         for p in self.dht:
-            self.peers[p] = (*self.peers[p][:3], "Free")
-        return "SUCCESS 4"
+            self.peers[p] = (*self.peers[p][:3], "InDHT")
+        # Set leader peer to state "Leader"
+        ip, m_port, p_port, _ = self.peers[peer_name]  # unpack everything except old state
+        self.peers[peer_name] = (ip, m_port, p_port, "Leader")
+
+        return "SUCCESS"
 
 # Handle query-dht
     def handle_query_dht(self, peer_name):
@@ -273,6 +269,8 @@ class DHTManager:
             for peer_name in self.dht:
                 peer_ip, m_port, p_port, _ = self.peers[peer_name]  # Unpack existing values
                 self.peers[peer_name] = (peer_ip, m_port, p_port, "Free")  # Update state
+            # Resets dht to None since no peers are in DHT
+            self.dht = None
             # Return SUCCESS message
             return "SUCCESS"
 
