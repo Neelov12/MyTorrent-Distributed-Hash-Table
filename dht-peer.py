@@ -6,6 +6,7 @@ import csv
 import hashlib
 import time
 import os
+import re
 
 # Define the allowed port range based on G = 34
 # For group 34 it is 18000-18499
@@ -38,8 +39,8 @@ class DHTPeer:
         self.right_neighbor = None # Structure: (n_name, n_ip, n_port)
         self.left_neighbor = None # Structure: (n_ip, n_port)
 
-        # Information for CSV file
-        self.CSV_FILE = "details-1950.csv"
+        # Information for csv file, default file is from 1996
+        self.CSV_FILE = "details-1996.csv"
         self.REQUIRED_FIELDS = [
             "EVENT_ID", "STATE", "YEAR", "MONTH_NAME", "EVENT_TYPE", "CZ_TYPE", "CZ_NAME",
             "INJURIES_DIRECT", "INJURIES_INDIRECT", "DEATHS_DIRECT", "DEATHS_INDIRECT",
@@ -56,7 +57,7 @@ class DHTPeer:
         # Internal tracking, whether peer left dht or not
         self.left_dht = False
 
-        # Forcibly switches listening on p_port and m_port on/off
+        # Used to force peer to stop listening on ports
         self.listen = True
 
         # These two variables control what the peer is expecting to receive and do as a response
@@ -64,10 +65,13 @@ class DHTPeer:
         self.waiting_on = ""
         self.waiting_to_send = ""
 
-        # Signals that peer is waiting for a command or message 
-        #   Used to reject commands from manager or other peer while it is waiting, and also to pause/resume main thread
+        # Process Handlers
+        #   Used to control if a process should start in response to received command
+        #   If peer is waiting on a specific message or already in process, and is not 
+        #   multiprocessing, peer sends back a 'FAILURE' message
         self.waiting = False 
         self.in_process = False
+        self.multiprocessing = False
         # Statically stores port and message that peer is expecting 
         self.expecting = {} # Structure: {port, message}
 
@@ -88,13 +92,18 @@ class DHTPeer:
 # WAIT
     # Prompts main thread to "wait" until self.waiting is set to false, this is so peer waits for a response
     # from manager before proceeding with anything else
-    def wait_for(self, command, sender):
+    def wait_for(self, expected_command, expected_sender, accept_other_msgs=False, accept_other_peers=False):
         # 'sender' format: (ip, port)
+
+        # Set process handlers
+        #   Designate peer as waiting and multiprocessing if caller is accepting other messages and/or other peers
+        #   Note: Peer is not multiprocessing by default
+        self.multiprocessing = accept_other_msgs or accept_other_peers
         self.packet_received = ()
         self.waiting = True
         start_time = time.time()
         timeout = 15 # Timeout in <n> seconds
-        print(f"[INFO] {self.peer_name} is waiting for response {command} from {sender[0]} on port {sender[1]}")
+        print(f"[INFO] {self.peer_name} is waiting for response {expected_command} from {expected_sender[0]} on port {expected_sender[1]}")
 
         while True: 
             # Break loop if timed out
@@ -104,29 +113,54 @@ class DHTPeer:
             # If peer has not yet received a packet, skip to next iteration
             if not self.packet_received: 
                 continue
-
+            # If packet received, parse sender IP and port
             sender_ip = self.packet_received[0][0]
             sender_port = self.packet_received[0][1]
+            # If sender is not who peer was expecting:
+            if expected_sender != (sender_ip, sender_port):
+                self.packet_received = ()
+                # If peer is accepting messages from other peers, move to next iteration
+                if accept_other_peers:
+                    continue
+                # Otherwise, as long as sender is not the manager send a FAILURE message
+                else:
+                    if sender_ip != manager_ip and sender_port != manager_port:
+                        self.sockp.sendto("FAILURE waiting on a different message".encode(), (sender_ip, sender_port))
+                    continue
+            
+            # If received message is from expected sender, or it isn't but it's from the manager,
+            #   the message needs to be parsed before any further processing
             sender_message = self.packet_received[1]
             command_received = sender_message.split()
 
             # If packet received equals the packet peer is expecting, return True so caller function can proceed
-            if command == command_received[0] and sender == (sender_ip, sender_port):
+            if expected_command == command_received[0] and expected_sender == (sender_ip, sender_port):
+                self.multiprocessing = False
                 self.waiting = False
                 return True
+            # If message is not the one peer is expecting, or it is from manager
             else: 
-                # If sender is different and/or message is different than expected, respond with FAILURE
+                # Message is from manager:
                 if sender_ip == manager_ip and sender_port == manager_port:
+                    # If manager sends FAILURE message, terminate entire process immediately 
                     if command_received[0] == "FAILURE":
                         break
+                    # Else, send back a FAILURE
                     else:
-                        self.sendto_manager("FAILURE waiting on a different message")
+                        # If not accepting other messages, send a FAILURE 
+                        if not accept_other_msgs:
+                            self.sendto_manager("FAILURE waiting on a different message")
+                # Message is from expected peer, but message is not expected:
                 else: 
-                    self.sockp.sendto("FAILURE".encode(), (sender_ip, sender_port))
+                    # If not accepting other messages, send a FAILURE,
+                    #   otherwise, let listen_on_p_port thread handle it
+                    if not accept_other_msgs:
+                        self.sockp.sendto("FAILURE waiting on a different message".encode(), (sender_ip, sender_port))
                 # Reset packet_received to empty so that peer can continue waiting for a message 
                 self.packet_received = ()
 
         # If peer has not received the expected message before timeout, return False so caller function halts process
+        self.multiprocessing = False
         self.waiting = False
         return False
     
@@ -162,8 +196,10 @@ class DHTPeer:
 
                 # If peer is not already in another process, it saves the received message staticallay
                 self.packet_received = (addr, raw_message)
-                # If peer is waiting on a message, let wait_for function handle it
-                if self.waiting:
+
+                # If peer is waiting on a message and is not accepting multiple messages,
+                #   let wait_for function (input_loop thread) handle it
+                if self.waiting and not self.multiprocessing:
                     continue
 
                 # If peer is not waiting for anything, allow process_manager_cmd to handle message
@@ -171,7 +207,7 @@ class DHTPeer:
                 self.process_manager_cmd(raw_message.split())
 
             except Exception as e:
-                print("[ERROR in listen_on_m_loop]", e)
+                print(f"[ERROR in listen_on_m_port] {e} ({type(e)})")
 
 # LISTEN TO OTHER PEERS
 #   Listens for commands and sends responses 
@@ -197,20 +233,14 @@ class DHTPeer:
                 # If peer is not already in another process, it saves the received message staticallay
                 self.packet_received = (addr, raw_message)
 
-                # If peer is waiting on a message, let wait_for function handle it
-                if self.waiting:
+                # If peer is waiting on a message and is not accepting multiple messages,
+                #   let wait_for function (input_loop thread) handle it
+                if self.waiting and not self.multiprocessing:
                     continue
 
                 # If peer is not waiting for anything, allow process_peer_cmd to handle message
                 #   this usually indicates a new message or command
                 self.process_peer_cmd(raw_message.split())
-
-                #response = self.process_command(raw_message.split())
-
-                # Sends nothing if "Disregard", else sends response given by process_command
-                #if response and response != "Disregard":
-                #    print(f"[SENT] To {addr}: {response}")
-                #    self.sockp.sendto(response.encode(), addr)
 
             except Exception as e:
                 print(f"[ERROR in listen_on_p_port] {e} ({type(e)})")
@@ -238,10 +268,12 @@ class DHTPeer:
             self.handle_reset_id(int(command[1]), int(command[2]))
         elif cmd_type == "rebuild-dht":
             self.handle_rebuild_dht()
-        elif cmd_type == "add-me" and len(command) == 4:
-            self.handle_add_me(command[1], command[2], command[3])
+        elif cmd_type == "add-me" and len(command) == 5:
+            self.handle_add_me(command[1], command[2], command[3], command[4])
         elif cmd_type == "force-exit ManagerForcedExit":
             self.force_exit(command[1])
+        else:
+            return
 
 # INPUT LOOP
 #   Prompts user to send a command to manager 
@@ -257,7 +289,7 @@ class DHTPeer:
             print("5: Join DHT (join-dht)")
             print("6: Deregister and Exit (deregister)")
             print("7: Delete entire DHT (teardown-dht)")
-            print("8: Print Information")
+            print("8: See Information")
             option = input("\nSelect an option: \n").strip()
 
             if option == "1": 
@@ -266,7 +298,10 @@ class DHTPeer:
             elif option == "2":
                 n_size = input("Select size of hash table (integer): ")
                 y = input("Select year of storm data (YYYY): ")
-                peer.setup_dht(n_size, y)
+                if len(y) == 4 and y.isdigit() and int(y) >= 1950:
+                    peer.setup_dht(n_size, y)
+                else:
+                    print("Invalid year (must be at least 1950)")
             elif option == "3":
                 event_id = input("Enter storm event ID to query: ").strip()
                 self.last_queried_event_id = event_id
@@ -275,8 +310,7 @@ class DHTPeer:
                 self.leave_dht()
                 print("[INFO] DHT rebuild complete. You may now exit or rejoin another DHT.")
             elif option == "5":
-                self.join_dht()
-                print("[INFO] DHT rebuild complete. You've now joined the DHT.")
+                self.join_dht_last()
             elif option == "6":
                 peer.deregister()
             elif option == "7":
@@ -294,23 +328,36 @@ class DHTPeer:
 # Print all information currently stored by peer 
     def print_info(self):
         print("INFORMATION CURRENTLY STORED:")
-        print(f"\tMy name and IP: {self.peer_name}, {self.peer_ip}")
+        print(f"\tName: {self.peer_name}")
+        print(f"\tIP: {self.peer_ip}")
         print(f"\tMy manager is on (ip, port): {self.manager}")
         print(f"\tListening to peers on (p_port): {self.p_port}")
         print(f"\tListening to manager on (m_port): {self.m_port}")
         print("\nDHT RING INFORMATION:")
-        print(f"\tMy ID: {self.id}")
-        print(f"\tRing Size: {self.ring_size}")
-        print(f"\tRight Neighbor: {self.right_neighbor}")
-        print(f"\tLeft Neighbor: {self.left_neighbor}")
-        print("\nPEERS IN DHT:")
         if self.ring_size is not None:
+            print(f"\tMy ID: {self.id}")
+            print(f"\tRing Size: {self.ring_size}")
+            print(f"\tRight Neighbor: {self.right_neighbor}")
+            print(f"\tLeft Neighbor: {self.left_neighbor}")
+            if not self.local_dht:
+                print("\tWarning: DHT is empty")
+            print(f"\nPEERS IN DHT (My ID is {self.id}):")
             for i in range(0, self.ring_size):
                 peer_name, peer_ip, peer_port = self.peers[i]
-                print(f"\t{i}: {peer_name} ({peer_ip}, {peer_port})")
+                print(f"\tPeer ID {i}: {peer_name} ({peer_ip}, {peer_port})")
+            print("\nRING GEOMETRY")
+            print("\t", end='')
+            for i in range(0, self.ring_size):
+                peer_name, peer_ip, peer_port = self.peers[i]
+                print(f"[ID {i}: {peer_name}] --> ", end='')   
+            print("Back to ID 0")         
+        else: 
+            print("\tPeer is not in a DHT")
         print("\nCURRENT NETWORK INFORMATION:")
         print(f"\tCurrently in a process: {self.in_process}")
-        print(f"\tLast Received Message: {self.packet_received}")
+        print(f"\tCurrently waiting on a message: {self.waiting}")
+        print(f"\tCurrently multiprocessing: {self.multiprocessing}")
+        print(f"\tLast received message saved: {self.packet_received}")
 
 # Send register 
     # Sends register peer_name, peer ip, m_port, p_port
@@ -357,14 +404,18 @@ class DHTPeer:
     # (peer_name, n, yyyy)
     def setup_dht(self, n, year):
         """Send setup-dht request to the manager."""
+        # Set CSV_FILE to dataset corresponding to year
+        self.CSV_FILE = re.sub(r"\d{4}", year, self.CSV_FILE)
+        print(f"[INFO] DHT built on dataset: {self.CSV_FILE}")
+        # Send setup-dht to manager
         message = f"setup-dht {self.peer_name} {n} {year}"
         self.sendto_manager(message)
-
+        # Wait for response SUCCESS, then initialize the ring
         if self.wait_for("SUCCESS", self.manager):
             self.in_process = True
             self.initialize_ring(self.packet_received[1])
         else: 
-            print("[INFO] Could not do setup-dht")
+            print("[INFO] Manager did not approve setup-dht")
 
     # Initialize the ring, store all peers information 
     def initialize_ring(self, response):
@@ -444,7 +495,7 @@ class DHTPeer:
         # Function can be called in process of different commands
         if functionality == "setup-dht":
             self.dht_complete()
-        elif functionality == "leave-dht":
+        elif functionality == "leave-dht" or functionality == "join-dht":
             print("[INFO] DHT successfully reconstructed")
 
     # Helper function for construct_dht
@@ -604,7 +655,7 @@ class DHTPeer:
         # After sending leave-dht, waits for SUCCESS then sends teardown to right neighbor 
         self.sendto_manager(message)
         if self.wait_for("SUCCESS", self.manager):
-            self.teardown("leave-dht")
+            self.teardown(functionality="leave-dht")
         else: 
             print("[INFO] Manager does not approve leave-dht ")
     
@@ -660,10 +711,13 @@ class DHTPeer:
         self.sendto_r_neighbor(rebuild_dht_msg)     
         # Wait for SUCCESS from right neighbor, new leader
         n_name, n_ip, n_port = self.right_neighbor 
-        if self.wait_for("SUCCESS", (n_ip, int(n_port))):
+        if functionality == "join-dht":
             self.dht_rebuilt(functionality)
         else:
-            print("[INFO] New leader could not rebuild DHT")
+            if self.wait_for("SUCCESS", (n_ip, int(n_port)), accept_other_peers=True):
+                self.dht_rebuilt(functionality)
+            else:
+                print("[INFO] New leader could not rebuild DHT")
     
     # Meant only for new leader
     def handle_rebuild_dht(self):
@@ -681,9 +735,9 @@ class DHTPeer:
     
     # Step 4 of leave-dht 
     def dht_rebuilt(self, functionality):
+        # Sets the new leader
+        new_leader_name = self.right_neighbor[0] 
         if functionality == "leave-dht":
-            # Sets the new leader
-            new_leader_name = self.right_neighbor[0] 
             # Resets all DHT P2P variables so it is ready if peer wants to rejoin DHT 
             # List of peers, used by leader
             self.peers = {}         
@@ -697,7 +751,8 @@ class DHTPeer:
         # Sends dht-rebuilt <new_leader_name>
         dht_rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader_name}"
         self.sendto_manager(dht_rebuilt_msg)
-        if self.wait_for("SUCCESS", self.manager):
+        # Wait for SUCCESS from manager
+        if self.wait_for("SUCCESS", self.manager, accept_other_peers=True):
             if functionality == "leave-dht":
                 print("[INFO] Successfully left DHT")
             elif functionality == "join-dht":
@@ -705,9 +760,9 @@ class DHTPeer:
         else: 
             print("[INFO] Changed the entire ring, but does not approve me leaving/joining DHT... we're in trouble")
 
-# join-dht <peer_name>
+# join-dht (at END of ring, leader stays the same)
     # Send join-dht to manager
-    def join_dht(self):
+    def join_dht_last(self):
         # Send command to manager
         join_dht_msg = f"join-dht {self.peer_name}"
         self.sendto_manager(join_dht_msg)
@@ -720,7 +775,7 @@ class DHTPeer:
     # Configure self dht info then send add-me to leader 
     def add_me(self, response):
         # Parse response from manager,
-            # format: "SUCCESS <list of peers in DHT>"
+            # format: "SUCCESS 2 <list of peers in DHT>"
         lines = response.split(' ')[2:]
         # Create list of peers already in dht
         self.peers = {
@@ -731,7 +786,8 @@ class DHTPeer:
         # Add self to list of peers in dht 
         my_id = len(self.peers)
         self.peers[my_id] = (self.peer_name, self.peer_ip, self.p_port)
-        # Set own dht info 
+
+        # Set own DHT information 
         self.id = my_id
         self.ring_size = my_id+1
         self.right_neighbor = self.peers[0]
@@ -739,37 +795,42 @@ class DHTPeer:
         n_name, n_ip, n_port = self.peers[prev_id]
         self.left_neighbor = (n_ip, int(n_port))
         print(f"id: {self.id}, ring size: {self.ring_size}")
+
         # Print updated list
         print("\n[SUMMARY] Records saved:")
         for peer_id in range(self.ring_size):
             peer_name, peer_ip, peer_port = self.peers[peer_id]
             print(f"Peer ID {peer_id} ({peer_name} at {peer_ip}:{peer_port})")
+
         # Send add-me command to right neighbor (current leader)
-        #self.sendto_r_neighbor(f"add-me {self.peer_name} {self.peer_ip} {self.p_port}")
+        self.sendto_r_neighbor(f"add-me {self.id} {self.peer_name} {self.peer_ip} {self.p_port}")
+
         # Wait for command to cycle the ring
         if self.wait_for("add-me", self.left_neighbor):
-            self.teardown("join-dht")
+            self.teardown(functionality="join-dht")
         else: 
             print("[INFO] Error: addme did not cycle through ring")
         
     # Handle addme command from joining peer
-    def handle_add_me(self, peer_name, peer_ip, peer_port):
-        old_last_id = len(self.peers)-1
+    def handle_add_me(self, new_id, peer_name, peer_ip, peer_port):
         # Change ring_size 
         old_r_size = self.ring_size
         self.ring_size = old_r_size + 1
         # Add peer to self.peers
-        new_peer_id = old_r_size
+        new_peer_id = int(new_id)
         self.peers[new_peer_id] = (peer_name, peer_ip, peer_port)
-        # If leader, change left neighbor to new peer
+        
+        # Change neighbors
+        #   If leader, change left neighbor to new peer
         if self.id == 0:
             n_name, n_ip, n_port = self.peers[new_peer_id]
             self.left_neighbor = (n_ip, int(n_port))
-        # If originally at the end of ring (max ID), change right neighbor to new peer
+        #   If originally at the end of ring (max ID), change right neighbor to new peer
+        old_last_id = new_peer_id - 1
         if self.id == old_last_id:
             self.right_neighbor = self.peers[new_peer_id]
         # Send add-me command to right neighbor 
-        self.sendto_r_neighbor(f"add-me {peer_name} {peer_ip} {p_port}")
+        self.sendto_r_neighbor(f"add-me {new_peer_id} {peer_name} {peer_ip} {peer_port}")
         # Print updated list
         print("\n[SUMMARY] Records saved:")
         for peer_id in range(self.ring_size):
@@ -787,12 +848,13 @@ class DHTPeer:
         self.sendto_manager(teardown_to_man_msg)
         # Waits for SUCCESS from manager, sends teardown to right neighbor if received
         if self.wait_for("SUCCESS", self.manager):
-            self.teardown("teardown-dht")
+            self.teardown()
         else: 
             print("[INFO] Manager does not approve teardown-dht")
 
 # Sends teardown
-    def teardown(self, functionality):
+    # Default functionality is "teardown-dht"
+    def teardown(self, functionality="teardown-dht"):
         # Sends teardown to right neighbor
         self.sendto_r_neighbor("teardown")
         # Waits for teardown command once the message is cycled thru the ring 

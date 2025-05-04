@@ -66,10 +66,7 @@ class DHTManager:
                     self.sock.sendto(message.encode(), (ip, m_port))
                 exit(0)
             if choice == "2": 
-                print("REGISTERED PEERS WITH MANAGER:")
-                print(self.peers)
-                print("PEERS THAT ARE IN THE DHT:")
-                print(self.dht)
+                self.print_info()
             else:
                 print("Invalid choice. Please enter 1 to exit.")
 
@@ -114,6 +111,23 @@ class DHTManager:
             return "NO RESPONSE"
         else:
             return "FAILURE Invalid command"
+
+# Print Information 
+    def print_info(self):
+        print("PEERS REGISTERED WITH MANAGER:")
+        if self.peers:
+            for peer_name, (ip, m_port, p_port, state) in self.peers.items():
+                print(f"\t{peer_name}: (IP: {ip}, m_port: {m_port}, p_port: {p_port}, State: {state})")
+        else:
+            print("\tNo peers registered with manager.")
+        print("DHT RING:")
+        if self.dht:
+            print("Current DHT Ring:")
+            for i, peer_name in enumerate(self.dht):
+                ip, m_port, p_port, state = self.peers[peer_name]
+                print(f"\tPeer {i}: {peer_name}: (IP: {ip}, m_port: {m_port}, p_port: {p_port}, State: {state})")
+        else:
+            print("\tNo active DHT ring.")
     
 # Handle register (Receive) 
     def handle_register(self, peer_name, ip, m_port, p_port):
@@ -175,7 +189,7 @@ class DHTManager:
     def handle_leave_dht(self, peer_name):
         if self.dht is None or peer_name not in self.dht:
             return "FAILURE Peer not in DHT"
-        if self.leaving_peer is not None:
+        if self.joining_peer is not None or self.leaving_peer is not None:
             return "FAILURE Another leave/join already in progress"
         
         self.leaving_peer = peer_name
@@ -184,7 +198,7 @@ class DHTManager:
 
 # Handle dht-rebuilt
     def handle_dht_rebuilt(self, peer_name, new_leader):
-        
+        # If command is from a joining peer
         if self.joining_peer is not None:
             if peer_name != self.joining_peer:
                 return "FAILURE Rebuilder mismatch"
@@ -205,25 +219,27 @@ class DHTManager:
             self.joining_peer = None
             return "SUCCESS"
         
-        if self.leaving_peer is None:
-            return "FAILURE No leave/join in progress"
-        if peer_name != self.leaving_peer:
-            return "FAILURE Rebuilder mismatch"
-    
-        if new_leader not in self.dht:
-            return "FAILURE New leader not valid"
+        # If command is from a leaving peer
+        elif self.leaving_peer is not None:
+            if peer_name != self.leaving_peer:
+                return "FAILURE Rebuilder mismatch" 
+            if new_leader not in self.dht:
+                return "FAILURE New leader not valid"
 
-        self.dht.remove(self.leaving_peer)
-        self.peers[self.leaving_peer] = (*self.peers[self.leaving_peer][:3], "Free")
-        self.peers[new_leader] = (*self.peers[new_leader][:3], "Leader")
+            self.dht.remove(self.leaving_peer)
+            self.peers[self.leaving_peer] = (*self.peers[self.leaving_peer][:3], "Free")
+            self.peers[new_leader] = (*self.peers[new_leader][:3], "Leader")
     
-        for p in self.dht:
-           if p != new_leader:
-                self.peers[p] = (*self.peers[p][:3], "InDHT")
+            for p in self.dht:
+                if p != new_leader:
+                    self.peers[p] = (*self.peers[p][:3], "InDHT")
 
-        self.dht = [new_leader] + [p for p in self.dht if p != new_leader]
-        self.leaving_peer = None
-        return "SUCCESS"
+            self.dht = [new_leader] + [p for p in self.dht if p != new_leader]
+            self.leaving_peer = None
+            self.waiting_on = ""
+            return "SUCCESS"
+        
+        return "FAILURE No active leave/joins. DHT rebuilt without permission."
         
 # Handle join-dht
     def handle_join_dht(self, peer_name):
@@ -233,9 +249,13 @@ class DHTManager:
             return "FAILURE Peer not in Free state"
         if self.joining_peer is not None or self.leaving_peer is not None:
             return "FAILURE Another leave/join already in progress"
+        
+        self.waiting_on = "dht-rebuilt"
 
         self.joining_peer = peer_name
-        return "SUCCESS"
+        dht_info = [(p, *self.peers[p][:3]) for p in self.dht]
+        print(dht_info)
+        return "SUCCESS 2 " + " ".join(["(" + ",".join(map(str, peer)) + ")" for peer in dht_info])
 
 # Handle deregister
     def handle_deregister(self, peer_name):
