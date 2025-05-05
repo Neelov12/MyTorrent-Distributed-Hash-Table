@@ -92,7 +92,7 @@ class DHTPeer:
 # WAIT
     # Prompts main thread to "wait" until self.waiting is set to false, this is so peer waits for a response
     # from manager before proceeding with anything else
-    def wait_for(self, expected_command, expected_sender, multiprocess_other_msg=False, multiprocess_peers=False, or_any_peer=False):
+    def wait_for(self, expected_command, expected_sender, multiprocess_other_msg=False, multiprocess_peers=False, or_any_peer=False, catch_failure=False):
         # 'sender' format: (ip, port)
         # Error handle call to function 
         if multiprocess_peers and or_any_peer:
@@ -164,7 +164,11 @@ class DHTPeer:
                             self.sendto_manager("FAILURE waiting on a different message")
                 # Message is from a peer, but message is not expected:
                 else: 
-                    # If not accepting other messages, send a FAILURE,
+                    # If peer wants to catch FAILURE messages and receives it, break loop then returns false
+                    if catch_failure:
+                        if command_received[0] == "FAILURE":
+                            break
+                    # If not multiprocessing other messages, send a FAILURE,
                     #   otherwise, let listen_on_p_port thread handle it
                     if not multiprocess_other_msg:
                         self.sockp.sendto("FAILURE waiting on a different message".encode(), (sender_ip, sender_port))
@@ -562,7 +566,6 @@ class DHTPeer:
         else: 
             print("[INFO] Error setting up DHT.")
 
-
 # Handles set-id 
     def handle_set_id(self, command):
         # Sets id and ring size to id and ring size sent by leader
@@ -608,8 +611,8 @@ class DHTPeer:
         store_msg = ' '.join(command)
         self.sendto_r_neighbor(store_msg)
 
-# Sends query-dht  
-    # Sends command to manager, if approved receives info for random chosen peer in DHT
+# query-dht  
+    # Sends query-dht command to manager, if approved receives info for random chosen peer in DHT
     def query_dht(self, event_id):
         # Send query-dht to manager
         msg = f"query-dht {self.peer_name}"
@@ -620,24 +623,22 @@ class DHTPeer:
         else:
             print("[INFO] Manager does not approve query-dht")
 
-        
-
     # Sends find-event
     #   'command' contains [name, ip, port] of first peer to find event
     def find_event(self, event_id, command):
         parts = command.split()
         peer_name = parts[1]
         peer_ip = parts[2]
-        peer_port = int(parts[3])
+        peer_port = parts[3]
         # Send find-event to random peer chosen by manager
         msg = f"find-event {event_id} {self.peer_name} {self.peer_ip} {self.p_port}"
-        self.sockp.sendto(msg.encode(), (peer_ip, peer_port))
+        self.sockp.sendto(msg.encode(), (peer_ip, int(peer_port)))
         print(f"[SENT] To {peer_name} ({peer_ip} on {peer_port}): {msg}")
-        # Wait for SUCCESS from chosen peer 
-        if self.wait_for("SUCCESS", (peer_ip, peer_port)):
-            print()
+        # Wait for SUCCESS from chosen peer or from ANY peer, then print event
+        if self.wait_for("SUCCESS", (peer_ip, int(peer_port)), or_any_peer=True, catch_failure=True):
+            self.print_event(self.packet_received[1])
         else:   
-            print("[INFO] Record could not be queried.")
+            print(f"[INFO] Storm event {event_id} not in the DHT.")
 
     # Handles find-event
     def handle_find_event(self, event_id, s_name, s_ip, s_port, id_sequence=None):
@@ -653,8 +654,13 @@ class DHTPeer:
         # Encode for socket messaging
         id_seq_data = ",".join(map(str, id_seq))  # s = "0,1,2"
         # Calculate pos and target 
-        pos = event_id % self.next_prime(2 * 1000)
+        records = self.load_filtered_data(self.CSV_FILE)
+        num_events = len(records)  # l
+        #  s - hash table size 
+        s = self.next_prime(2 * num_events)
+        pos = event_id % s
         target_id = pos % self.ring_size
+
         # Determine if peer is supposed to have the record
         if self.id == target_id:
             record = self.local_dht.get(pos)
@@ -667,7 +673,7 @@ class DHTPeer:
                 response = f"FAILURE {event_id} {id_seq_data}"
                 print("[INFO] Asked to do find-event, I am target ID but I could not find record")
             print(f"[SENT] To {s_name} ({s_ip} on {s_port}): {response}")
-            self.sockp.sendto(response.encode(), (s_ip, s_port))
+            self.sockp.sendto(response.encode(), (s_ip, int(s_port)))
             return
         
         # If peer is not supposed to have the event_id
@@ -679,47 +685,37 @@ class DHTPeer:
         if not I: 
             response = f"FAILURE {event_id} {id_seq_data}"
             print(f"[SENT] To {s_name} ({s_ip} on {s_port}): {response}")
-            self.sockp.sendto(response.encode(), (s_ip, s_port))
+            self.sockp.sendto(response.encode(), (s_ip, int(s_port)))
             return
-        # If I is not empty, choose a peer ID at random and forward find-event
+        # If I is not empty, choose a peer ID at random from I 
         next_id = random.choice(I)
+        # Forward find-event with id-seq to chosen peer
         n_name, n_ip, n_port = self.peers[next_id]
-        forward_find_event_msg = f"find-event "
+        forward_find_event_msg = f"find-event {event_id} {s_name} {s_ip} {s_port} {id_seq_data}"
+        self.sockp.sendto(forward_find_event_msg.encode(), (n_ip, int(n_port)))
+        print(f"[SENT] To {n_name} ({n_ip} on {n_port}): {forward_find_event_msg}")
 
-    def handle_find_event_og(self, command):
-        event_id = int(command[1])
-        origin_name = command[2]
-        origin_ip = command[3]
-        origin_port = int(command[4])
-        hops = int(command[5])
+    # If storm event queried, print it and id-seq
+    def print_event(self, response):
+        # Parse response
+        # Expected response from a peer is of the format:
+        #   "SUCCESS {event_id} {id_seq_data} {rec_data}"
+        parts = response.split()
+        event_id = parts[1]
+        id_seq_data = parts[2]
+        id_seq = list(map(int, id_seq_data.split(",")))
+        rec = tuple(parts[3:])
 
-        pos = event_id % self.next_prime(2 * 1000)
-        target_id = pos % self.ring_size
-
-        if self.id == target_id:
-            record = self.local_dht.get(pos)
-            if record:
-                response = f"SUCCESS {event_id} hops={hops} record=" + ",".join(record)
-            else:
-                response = f"FAILURE {event_id} hops={hops} record=NOT_FOUND"
-            print(f"[RESULT] Sent back to {origin_name} at {origin_ip}:{origin_port}")
-            self.sock.sendto(response.encode(), (origin_ip, origin_port))
-            return "Disregard"
-        else:
-            next_id = random.choice([i for i in self.peers if i != self.id])
-            peer_name, peer_ip, peer_port = self.peers[next_id]
-            if int(peer_port) == self.manager_port:
-                print("[WARN] Not forwarding to manager (invalid peer)")
-                return "Disregard"
-            hops += 1
-            forward_msg = f"find-event {event_id} {origin_name} {origin_ip} {origin_port} {hops}"
-            print(f"[FORWARD] To {peer_name} at {peer_ip}:{peer_port} (hop {hops})")
-            self.sock.sendto(forward_msg.encode(), (peer_ip, int(peer_port)))
-            return "Disregard"
+        print("[SUMMARY]")
+        print("\tQUERIED STORM EVENT:")
+        for field, value in zip(self.REQUIRED_FIELDS, rec):
+            print(f"\t\t{field}: {value}")
+        print("\tID SEQUENCE:")
+        print(f"\t\t{id_seq}")
             
-# Sends leave-dht <peer_name> 
-#   to manager and waits for SUCCESS, then does
-#   Step 1 of leave-dht, sends teardown to cycle thru ring
+# leave-dht 
+    # Sends leave-dht <peer_name> to manager and waits for SUCCESS, then does
+    #   Step 1 of leave-dht, sends teardown to cycle thru ring
     def leave_dht(self):
         message = f"leave-dht {self.peer_name}"
         # After sending leave-dht, waits for SUCCESS then sends teardown to right neighbor 
