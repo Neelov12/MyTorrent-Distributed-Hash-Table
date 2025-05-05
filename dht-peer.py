@@ -92,13 +92,16 @@ class DHTPeer:
 # WAIT
     # Prompts main thread to "wait" until self.waiting is set to false, this is so peer waits for a response
     # from manager before proceeding with anything else
-    def wait_for(self, expected_command, expected_sender, accept_other_msgs=False, accept_other_peers=False):
+    def wait_for(self, expected_command, expected_sender, multiprocess_other_msg=False, multiprocess_peers=False, or_any_peer=False):
         # 'sender' format: (ip, port)
-
+        # Error handle call to function 
+        if multiprocess_peers and or_any_peer:
+            print("[ERROR] wait_for (argument error): Cannot multiprocess messages from other peers and also wait for a specific message from any peer at the same time")
+            return False
         # Set process handlers
         #   Designate peer as waiting and multiprocessing if caller is accepting other messages and/or other peers
         #   Note: Peer is not multiprocessing by default
-        self.multiprocessing = accept_other_msgs or accept_other_peers
+        self.multiprocessing = multiprocess_other_msg or multiprocess_peers
         self.packet_received = ()
         self.waiting = True
         start_time = time.time()
@@ -113,34 +116,43 @@ class DHTPeer:
             # If peer has not yet received a packet, skip to next iteration
             if not self.packet_received: 
                 continue
+
             # If packet received, parse sender IP and port
             sender_ip = self.packet_received[0][0]
             sender_port = self.packet_received[0][1]
-            # If sender is not who peer was expecting:
+
+            # Check if SENDER = EXPECTED SENDER:
             if expected_sender != (sender_ip, sender_port):
-                self.packet_received = ()
-                # If peer is accepting messages from other peers, move to next iteration
-                if accept_other_peers:
+                # If peer is multiprocessing messages from other peers, move to next iteration
+                #   and let listen_on_p_port thread handle the message
+                if multiprocess_peers:
+                    self.packet_received = ()
                     continue
-                # Otherwise, as long as sender is not the manager send a FAILURE message
-                else:
+                # If message is from a peer bur not accepting messages from other peers, 
+                #   send FAILURE and move to next iteration
+                if not or_any_peer:
                     if sender_ip != manager_ip and sender_port != manager_port:
+                        self.packet_received = ()
                         self.sockp.sendto("FAILURE waiting on a different message".encode(), (sender_ip, sender_port))
-                    continue
-            
-            # If received message is from expected sender, or it isn't but it's from the manager,
-            #   the message needs to be parsed before any further processing
+                        continue
+
+            # Proceeds only if: 
+            #   - SENDER = EXPECTED SENDER
+            #   - Peer is accepting message from any peer
+            #   - Peer is expecting message from a peer, but received from manager
+            # Command now needs to be parsed and processed
             sender_message = self.packet_received[1]
             command_received = sender_message.split()
 
-            # If packet received equals the packet peer is expecting, return True so caller function can proceed
-            if expected_command == command_received[0] and expected_sender == (sender_ip, sender_port):
+            # If command received is the command peer is expecting, return True so caller function 
+            #   can proceed with process
+            if expected_command == command_received[0]:
                 self.multiprocessing = False
                 self.waiting = False
                 return True
-            # If message is not the one peer is expecting, or it is from manager
+            # If message is not the one peer is expecting:
             else: 
-                # Message is from manager:
+                # If message is from manager:
                 if sender_ip == manager_ip and sender_port == manager_port:
                     # If manager sends FAILURE message, terminate entire process immediately 
                     if command_received[0] == "FAILURE":
@@ -148,13 +160,13 @@ class DHTPeer:
                     # Else, send back a FAILURE
                     else:
                         # If not accepting other messages, send a FAILURE 
-                        if not accept_other_msgs:
+                        if not multiprocess_other_msg:
                             self.sendto_manager("FAILURE waiting on a different message")
-                # Message is from expected peer, but message is not expected:
+                # Message is from a peer, but message is not expected:
                 else: 
                     # If not accepting other messages, send a FAILURE,
                     #   otherwise, let listen_on_p_port thread handle it
-                    if not accept_other_msgs:
+                    if not multiprocess_other_msg:
                         self.sockp.sendto("FAILURE waiting on a different message".encode(), (sender_ip, sender_port))
                 # Reset packet_received to empty so that peer can continue waiting for a message 
                 self.packet_received = ()
@@ -270,6 +282,11 @@ class DHTPeer:
             self.handle_rebuild_dht()
         elif cmd_type == "add-me" and len(command) == 5:
             self.handle_add_me(command[1], command[2], command[3], command[4])
+        # self, event_ID, S_name, S_ip, S_port, id_sequence=None):
+        elif cmd_type == "find-event" and len(command) == 5:
+            self.handle_find_event(int(command[1]), command[2], command[3], int(command[4]))
+        elif cmd_type == "find-event" and len(command) == 6:
+            self.handle_find_event(int(command[1]), command[2], command[3], int(command[4]), id_sequence=command[5])            
         elif cmd_type == "force-exit ManagerForcedExit":
             self.force_exit(command[1])
         else:
@@ -280,7 +297,6 @@ class DHTPeer:
     def input_loop(self):
         # Prompts user to issue command to manager
         while True: 
-            time.sleep(1)
             print(f"\nPeer {self.peer_name}, enter a command at any time:")
             print("1: Force Exit")
             print("2: Set up DHT (setup-dht)")
@@ -300,6 +316,7 @@ class DHTPeer:
                 y = input("Select year of storm data (YYYY): ")
                 if len(y) == 4 and y.isdigit() and int(y) >= 1950:
                     peer.setup_dht(n_size, y)
+                    time.sleep(1)
                 else:
                     print("Invalid year (must be at least 1950)")
             elif option == "3":
@@ -308,7 +325,6 @@ class DHTPeer:
                 peer.query_dht(event_id)
             elif option == "4":
                 self.leave_dht()
-                print("[INFO] DHT rebuild complete. You may now exit or rejoin another DHT.")
             elif option == "5":
                 self.join_dht_last()
             elif option == "6":
@@ -593,30 +609,84 @@ class DHTPeer:
         self.sendto_r_neighbor(store_msg)
 
 # Sends query-dht  
+    # Sends command to manager, if approved receives info for random chosen peer in DHT
     def query_dht(self, event_id):
+        # Send query-dht to manager
         msg = f"query-dht {self.peer_name}"
-        self.sock.sendto(msg.encode(), (self.manager_ip, self.manager_port))
+        self.sendto_manager(msg)
+        # Wait for SUCCESS response
+        if self.wait_for("SUCCESS", self.manager):
+            self.find_event(event_id, self.packet_received[1])
+        else:
+            print("[INFO] Manager does not approve query-dht")
 
-        try:
-            response, _ = self.sock.recvfrom(2048)
-            parts = response.decode().split()
-            if parts[0] != "SUCCESS":
-                print("[FAILURE] Query rejected by manager:", response.decode())
-                return
+        
 
-            entry_peer_name = parts[1]
-            entry_ip = parts[2]
-            entry_pport = int(parts[3])
+    # Sends find-event
+    #   'command' contains [name, ip, port] of first peer to find event
+    def find_event(self, event_id, command):
+        parts = command.split()
+        peer_name = parts[1]
+        peer_ip = parts[2]
+        peer_port = int(parts[3])
+        # Send find-event to random peer chosen by manager
+        msg = f"find-event {event_id} {self.peer_name} {self.peer_ip} {self.p_port}"
+        self.sockp.sendto(msg.encode(), (peer_ip, peer_port))
+        print(f"[SENT] To {peer_name} ({peer_ip} on {peer_port}): {msg}")
+        # Wait for SUCCESS from chosen peer 
+        if self.wait_for("SUCCESS", (peer_ip, peer_port)):
+            print()
+        else:   
+            print("[INFO] Record could not be queried.")
 
-            msg = f"find-event {event_id} {self.peer_name} {self.peer_ip} {self.p_port} 0"
-            print(f"[SENT] Query sent to {entry_peer_name} at {entry_ip}:{entry_pport}")
-            print(f"[DEBUG] Sending find-event to {entry_ip}:{entry_pport} => {msg}")
-            self.sock.sendto(msg.encode(), (entry_ip, entry_pport))
-        except Exception as e:
-            print("[ERROR] Failed to send query:", e)
+    # Handles find-event
+    def handle_find_event(self, event_id, s_name, s_ip, s_port, id_sequence=None):
+        # Initialize id_seq, sequence of IDs that have tried to find event
+        id_seq = []
+        # Parse id_sequence into a list, if it exists. If it does not, this is the first peer
+        #   to receive find-event
+        if id_sequence is not None:
+            id_seq = list(map(int, id_sequence.split(",")))  # format: [0, 1, 2]
 
+        # Add self to sequence of IDs
+        id_seq.append(self.id)
+        # Encode for socket messaging
+        id_seq_data = ",".join(map(str, id_seq))  # s = "0,1,2"
+        # Calculate pos and target 
+        pos = event_id % self.next_prime(2 * 1000)
+        target_id = pos % self.ring_size
+        # Determine if peer is supposed to have the record
+        if self.id == target_id:
+            record = self.local_dht.get(pos)
+            # If it does, send SUCCESS along with record, id_seq, and event_id
+            if record:
+                rec_data = " ".join(record)
+                response = f"SUCCESS {event_id} {id_seq_data} {rec_data}"
+            # If it's supposed to have the record but does not, send FAILURE
+            else:
+                response = f"FAILURE {event_id} {id_seq_data}"
+                print("[INFO] Asked to do find-event, I am target ID but I could not find record")
+            print(f"[SENT] To {s_name} ({s_ip} on {s_port}): {response}")
+            self.sockp.sendto(response.encode(), (s_ip, s_port))
+            return
+        
+        # If peer is not supposed to have the event_id
+        #    create I, every peer ID not in id-seq
+        peer_ids = list(range(self.ring_size))
+        I = [i for i in peer_ids if i not in id_seq]
+        # If I is empty, meaning every peer has been sent find-event, yet record is not found, 
+        #   send FAILURE along with event_id and id sequence
+        if not I: 
+            response = f"FAILURE {event_id} {id_seq_data}"
+            print(f"[SENT] To {s_name} ({s_ip} on {s_port}): {response}")
+            self.sockp.sendto(response.encode(), (s_ip, s_port))
+            return
+        # If I is not empty, choose a peer ID at random and forward find-event
+        next_id = random.choice(I)
+        n_name, n_ip, n_port = self.peers[next_id]
+        forward_find_event_msg = f"find-event "
 
-    def handle_find_event(self, command):
+    def handle_find_event_og(self, command):
         event_id = int(command[1])
         origin_name = command[2]
         origin_ip = command[3]
@@ -629,7 +699,7 @@ class DHTPeer:
         if self.id == target_id:
             record = self.local_dht.get(pos)
             if record:
-                response = f"SUCCESS {event_id} hops={hops} record=" + "|".join(record)
+                response = f"SUCCESS {event_id} hops={hops} record=" + ",".join(record)
             else:
                 response = f"FAILURE {event_id} hops={hops} record=NOT_FOUND"
             print(f"[RESULT] Sent back to {origin_name} at {origin_ip}:{origin_port}")
@@ -713,8 +783,9 @@ class DHTPeer:
         n_name, n_ip, n_port = self.right_neighbor 
         if functionality == "join-dht":
             self.dht_rebuilt(functionality)
+        # If functionality = "leave-dht"
         else:
-            if self.wait_for("SUCCESS", (n_ip, int(n_port)), accept_other_peers=True):
+            if self.wait_for("SUCCESS", (n_ip, int(n_port)), multiprocess_peers=True):
                 self.dht_rebuilt(functionality)
             else:
                 print("[INFO] New leader could not rebuild DHT")
@@ -752,7 +823,7 @@ class DHTPeer:
         dht_rebuilt_msg = f"dht-rebuilt {self.peer_name} {new_leader_name}"
         self.sendto_manager(dht_rebuilt_msg)
         # Wait for SUCCESS from manager
-        if self.wait_for("SUCCESS", self.manager, accept_other_peers=True):
+        if self.wait_for("SUCCESS", self.manager, multiprocess_peers=True):
             if functionality == "leave-dht":
                 print("[INFO] Successfully left DHT")
             elif functionality == "join-dht":
