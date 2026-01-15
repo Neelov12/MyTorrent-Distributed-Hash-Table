@@ -1,4 +1,4 @@
-# Distributed Hash Table 
+# MyTorrent: A Distributed Hash Table 
 
 This Distributed Hash Table (DHT) uses a secure hash function based on the number of peers available to fetch data from large datasets. The DHT topology depends on a Manager-Leader-Peer relationship, where the Manager builds, organizes, and maintains the DHT, the Leader is a Peer with exclusive permission to communicate only with the Manager, and the Peers are designated only to communicate P2P and with no other host. 
 
